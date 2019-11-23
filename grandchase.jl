@@ -17,9 +17,9 @@ show(io::IO, card::MonsterCard) =
     print(io, "MC $(card.star)")
 
 const UpgradeLevel = UInt8 # 0..12
-struct Lvl end
-const L = Lvl()
-*(n::Int, l::Lvl)::UpgradeLevel =
+struct LvlSymbol end
+const L = LvlSymbol()
+*(n::Int, l::LvlSymbol)::UpgradeLevel =
     UpgradeLevel(n)
 
 struct Hero
@@ -77,4 +77,27 @@ function star_cap(star::Star)::UpgradeLevel
     elseif star == ☆☆☆☆☆☆ UpgradeLevel(12)
     else UpgradeLevel(0) # bad
     end
+end
+
+struct Probably{T}
+    prob::Prob
+    value::T
+const Distrib{T} = Dict{T, Prob}
+
+struct HeroUpgradeState
+    prob_bonus::ProbBonus
+    hero::Hero
+end
+
+struct HeroUpgradeResult
+    prob_bonus::ProbBonus
+    upgrade::UpgradeLevel
+    rest::Vector{MonsterCard}
+end
+
+function simulate_hero_upgrade(lvl::UpgradeLevel, target::UpgradeLevel, cards::Vector{MonsterCard})::HeroUpgradeResult
+    while lvl < target && !isempty(cards)
+        1
+    end
+    undef
 end
