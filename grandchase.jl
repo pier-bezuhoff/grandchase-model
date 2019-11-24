@@ -24,27 +24,41 @@ const MC = MonsterCardSymbol()
 show(io::IO, card::MonsterCard) =
     print(io, "MC ", card.star)
 
-const UpgradeLevel = UInt8 # 0..12
+const UpgradeLvl = UInt8 # 0..12
 struct LvlSymbol end
 const L = LvlSymbol()
-*(n::Int, ::LvlSymbol)::UpgradeLevel =
-    UpgradeLevel(n)
+*(n::Int, ::LvlSymbol)::UpgradeLvl =
+    UpgradeLvl(n)
+
+function star_cap(star::Star)::UpgradeLvl
+    if star == ☆☆☆ UpgradeLvl(3)
+    elseif star == ☆☆☆☆ UpgradeLvl(6)
+    elseif star == ☆☆☆☆☆ UpgradeLvl(9)
+    elseif star == ☆☆☆☆☆☆ UpgradeLvl(12)
+    else UpgradeLvl(0) # bad
+    end
+end
 
 struct Hero
     star::Star # 3..6
-    upgrade::UpgradeLevel
+    upgrade::UpgradeLvl
+    function Hero(star::Star, upgrade::UpgradeLvl)
+        UInt8(star) >= 0x03 || error("hero can have >= 3 stars")
+        upgrade <= star_cap(star) || error("hero upgrade lvl capped by stars")
+        new(star, upgrade)
+    end
 end
 show(io::IO, hero::Hero) =
     print(io, "H ", hero.star, " ", Int(hero.upgrade), "L")
 Hero(n_stars::Int, lvl::Int)::Hero =
-    Hero(Star(n_stars), UpgradeLevel(lvl))
+    Hero(Star(n_stars), UpgradeLvl(lvl))
 struct HeroSymbol end
 const H = HeroSymbol()
 function *(n::Int, ::HeroSymbol)::Hero
     ds = digits(n)
     n_digits = length(ds)
     @assert n_digits >= 2
-    return Hero(Star(last(ds)), UpgradeLevel(n % 10 ^ (n_digits - 1)))
+    return Hero(Star(last(ds)), UpgradeLvl(n % 10 ^ (n_digits - 1)))
 end
 
 @enum HeroRank::UInt8 A S SR
@@ -52,7 +66,12 @@ end
 struct RankedHero
     rank::HeroRank
     star::Star
-    upgrade::UpgradeLevel
+    upgrade::UpgradeLvl
+    function RankedHero(rank::HeroRank, star::Star, upgrade::UpgradeLvl)
+        UInt8(star) >= 0x03 || error("hero can have >= 3 stars")
+        upgrade <= star_cap(star) || error("hero upgrade lvl capped by stars")
+        new(rank, star, upgrade)
+    end
 end
 show(io::IO, hero::RankedHero) =
     print(io, "H ", hero.rank, " ", hero.star, " ", Int(hero.upgrade), "L")
@@ -60,7 +79,7 @@ function *(n::Int, rank::HeroRank)::RankedHero
     ds = digits(n)
     n_digits = length(ds)
     @assert n_digits >= 2
-    return RankedHero(rank, Star(last(ds)), UpgradeLevel(n % 10 ^ (n_digits - 1)))
+    return RankedHero(rank, Star(last(ds)), UpgradeLvl(n % 10 ^ (n_digits - 1)))
 end
 convert(::Type{Hero}, hero::RankedHero)::Hero =
     Hero(hero.star, hero.upgrade)
@@ -98,15 +117,6 @@ function rel_prob_bonus(star::Star, monster_star::Star)::ProbBonus
     _rel_prob_bonus(star - monster_star)
 end
 
-function star_cap(star::Star)::UpgradeLevel
-    if star == ☆☆☆ UpgradeLevel(3)
-    elseif star == ☆☆☆☆ UpgradeLevel(6)
-    elseif star == ☆☆☆☆☆ UpgradeLevel(9)
-    elseif star == ☆☆☆☆☆☆ UpgradeLevel(12)
-    else UpgradeLevel(0) # bad
-    end
-end
-
 struct Probably{T}
     prob::Prob
     value::T
@@ -121,12 +131,12 @@ show(io::IO, x::HeroUpgradeResult) =
     print(io, "HUR($(x.hero), $(x.n_used_cards) cards used)")
 
 function simulate_hero_upgrade(hero::Hero, target::Hero, cards)::HeroUpgradeResult
-    lvl::UpgradeLevel = hero.upgrade
+    lvl::UpgradeLvl = hero.upgrade
     star::Star = hero.star
-    target_lvl::UpgradeLevel = target.upgrade
+    target_lvl::UpgradeLvl = target.upgrade
     target_star::Star = target.star
-    @assert target_lvl > lvl "target hero level < current level"
-    @assert lvl <= star_cap(star) && target_lvl <= star_cap(target_star) "level > start cap"
+    target_lvl > lvl || error("target hero level < current level")
+    lvl <= star_cap(star) && target_lvl <= star_cap(target_star) || error("level > start cap")
     prob_bonus::ProbBonus = zero(ProbBonus)
     if isempty(cards) || lvl >= target_lvl
         return HeroUpgradeResult(hero, 0)
@@ -142,7 +152,7 @@ function simulate_hero_upgrade(hero::Hero, target::Hero, cards)::HeroUpgradeResu
         n_used_cards += 1
         if result == 1
             prob_bonus = zero(ProbBonus)
-            lvl += one(UpgradeLevel)
+            lvl += one(UpgradeLvl)
             if lvl == target_lvl
                 return HeroUpgradeResult(target, n_used_cards)
             elseif lvl == star_cap(star)
@@ -155,17 +165,7 @@ function simulate_hero_upgrade(hero::Hero, target::Hero, cards)::HeroUpgradeResu
     return HeroUpgradeResult(Hero(star, lvl), n_used_cards)
 end
 
-function expected_n_cards(hero::Hero, target::Hero, card::MonsterCard; n_attempts::Int=1000)::Float64
-    cards = cycle([card])
-    sum::BigInt = 0
-    for attempt in 1:n_attempts
-        hur = simulate_hero_upgrade(hero, target, cards)
-        sum += hur.n_used_cards
-    end
-    return Float64(sum / n_attempts)
-end
-
-function expected_n_cards_f(hero::Hero, target::Hero, card::MonsterCard; n_attempts::Int=1000)::Float64
+function expected_n_cards(hero::Hero, target::Hero, card::MonsterCard; n_attempts::Int=10000)::Float64
     cards = cycle([card])
     average::Float64 = zero(Float64)
     for attempt in 1:n_attempts
@@ -176,6 +176,8 @@ function expected_n_cards_f(hero::Hero, target::Hero, card::MonsterCard; n_attem
 end
 
 # NOTE: priceXdNL ≈ N priceXd1L -- experimental fact
-const price2d3L = 8.6  # * MC(1) : H30 -> H33
-const price3d6L = 31.4 # * MC(1) : H40 -> H46
-const price2d6L = 17.2 # * MC(2) : H40 -> H46
+const price0d1L = 1.0  # * 5MC : H50 -> H51
+const price1d1L = 1.71 # * 4MC : H50 -> H51
+const price2d1L = 2.86 # * 3MC : H50 -> H51
+const price3d1L = 5.23 # * 2MC : H50 -> H51
+const price4d1L = 31.8 # * 1MC : H50 -> H51
