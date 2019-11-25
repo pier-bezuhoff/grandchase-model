@@ -9,6 +9,8 @@ import Base: *, -, show, convert
     Star(n * UInt8(s))
 -(s0::Star, s::Star)::Int8 =
     Int8(s0) - Int8(s)
+inc(star::Star, d::UInt8)::Star =
+    Star(UInt8(star) + d)
 inc(star::Star)::Star =
     Star(UInt8(star) + 0x01)
 
@@ -23,6 +25,10 @@ const MC = MonsterCardSymbol()
     fill(card, n)
 show(io::IO, card::MonsterCard) =
     print(io, "MC ", card.star)
+const game_price_MC1 = 5 # in honor shop
+const game_price_MC2 = 15
+const game_price_MC3 = 45
+
 
 const UpgradeLvl = UInt8 # 0..12
 struct LvlSymbol end
@@ -174,6 +180,7 @@ function simulate_hero_upgrade(up::HeroUpgrade, target::Hero, cards)::HeroUpgrad
     end
     return HeroUpgradeResult(Hero(star, lvl), n_used_cards)
 end
+# simulate onine methods (batch after batch)
 
 function expected_n_cards(up::HeroUpgrade, cards::Vector{MonsterCard}; n_attempts::Int=10000)::Float64
     cards = cycle(cards)
@@ -213,11 +220,17 @@ function prices(ups::Dict{HeroUpgrade, UInt8})::Dict{MonsterCard, Float16}
     for (up, n) in ups
         hero::Hero = up.hero
         target::Hero = up.target
-        if hero.upgrade > target.upgrade
-            if target.upgrade > star_cap(hero.star)
-                #
-            else
-                #
+        if hero.upgrade < target.upgrade
+            before_star_cap::UpgradeLvl = star_cap(hero.star) - hero.upgrade
+            for card in all_cards
+                ps[card] += before_star_cap * price(hero.star - card.star)
+            end
+            n_star_incs::UInt8 = (target.upgrade - star_cap(hero.star)) ÷ 0x03
+            for d_star = 0x01:n_star_incs
+                star::Star = inc(hero.star, d_star)
+                for card in all_cards
+                    ps[card] += 0x03 * price(star - card.star)
+                end
             end
         end
     end
