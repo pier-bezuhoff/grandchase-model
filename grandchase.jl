@@ -43,7 +43,7 @@ struct Hero
     star::Star # 3..6
     upgrade::UpgradeLvl
     function Hero(star::Star, upgrade::UpgradeLvl)
-        UInt8(star) >= 0x03 || error("hero can have >= 3 stars")
+        UInt8(star) >= 0x03 || error("hero must have >= 3 stars")
         upgrade <= star_cap(star) || error("hero upgrade lvl capped by stars")
         new(star, upgrade)
     end
@@ -61,6 +61,20 @@ function *(n::Int, ::HeroSymbol)::Hero
     return Hero(Star(last(ds)), UpgradeLvl(n % 10 ^ (n_digits - 1)))
 end
 
+struct HeroUpgrade
+    hero::Hero
+    target::Hero
+    function HeroUpgrade(hero::Hero, target::Hero)
+        target.upgrade > hero.upgrade || error("target hero upgrade < current hero upgrade")
+        hero.upgrade <= star_cap(hero.star) && target.upgrade <= star_cap(target.star) || error("upgrade > star cap")
+        new(hero, target)
+    end
+end
+show(io::IO, up::HeroUpgrade) =
+    print(io, up.hero, " → ", up.target)
+→(hero::Hero, target::Hero)::HeroUpgrade =
+    HeroUpgrade(hero, target)
+
 @enum HeroRank::UInt8 A S SR
 
 struct RankedHero
@@ -68,7 +82,7 @@ struct RankedHero
     star::Star
     upgrade::UpgradeLvl
     function RankedHero(rank::HeroRank, star::Star, upgrade::UpgradeLvl)
-        UInt8(star) >= 0x03 || error("hero can have >= 3 stars")
+        UInt8(star) >= 0x03 || error("hero must have >= 3 stars")
         upgrade <= star_cap(star) || error("hero upgrade lvl capped by stars")
         new(rank, star, upgrade)
     end
@@ -117,12 +131,6 @@ function rel_prob_bonus(star::Star, monster_star::Star)::ProbBonus
     _rel_prob_bonus(star - monster_star)
 end
 
-struct Probably{T}
-    prob::Prob
-    value::T
-end
-const Distrib{T} = Dict{T, Prob}
-
 struct HeroUpgradeResult
     hero::Hero
     n_used_cards::Int
@@ -130,7 +138,9 @@ end
 show(io::IO, x::HeroUpgradeResult) =
     print(io, "HUR($(x.hero), $(x.n_used_cards) cards used)")
 
-function simulate_hero_upgrade(hero::Hero, target::Hero, cards)::HeroUpgradeResult
+function simulate_hero_upgrade(up::HeroUpgrade, target::Hero, cards)::HeroUpgradeResult
+    hero::Hero = up.hero
+    target::Hero = up.target
     lvl::UpgradeLvl = hero.upgrade
     star::Star = hero.star
     target_lvl::UpgradeLvl = target.upgrade
@@ -165,14 +175,19 @@ function simulate_hero_upgrade(hero::Hero, target::Hero, cards)::HeroUpgradeResu
     return HeroUpgradeResult(Hero(star, lvl), n_used_cards)
 end
 
-function expected_n_cards(hero::Hero, target::Hero, card::MonsterCard; n_attempts::Int=10000)::Float64
-    cards = cycle([card])
+function expected_n_cards(up::HeroUpgrade, cards::Vector{MonsterCard}; n_attempts::Int=10000)::Float64
+    cards = cycle(cards)
     average::Float64 = zero(Float64)
+    # TODO: try mean([...])
     for attempt in 1:n_attempts
-        hur = simulate_hero_upgrade(hero, target, cards)
+        hur = simulate_hero_upgrade(up, cards)
         average += hur.n_used_cards / n_attempts
     end
     return average
+end
+
+function expected_n_cards(up::HeroUpgrade, card::MonsterCard; n_attempts::Int=10000)::Float64
+    return expected_n_cards(up, [card]; n_attempts=n_attempts)
 end
 
 # NOTE: priceXdNL ≈ N priceXd1L -- experimental fact
@@ -181,3 +196,36 @@ const price1d1L = 1.71 # * 4MC : H50 -> H51
 const price2d1L = 2.86 # * 3MC : H50 -> H51
 const price3d1L = 5.23 # * 2MC : H50 -> H51
 const price4d1L = 31.8 # * 1MC : H50 -> H51
+
+function price(d::Int8)::Float16
+    if d <= 0x00 1/price0d1L
+    elseif d == 0x01 1/price1d1L
+    elseif d == 0x02 1/price2d1L
+    elseif d == 0x03 1/price3d1L
+    elseif d == 0x04 1/price4d1L
+    else 0.0
+    end
+end
+
+function prices(ups::Dict{HeroUpgrade, UInt8})::Dict{MonsterCard, Float16}
+    all_cards::Vector{MonsterCard} = MonsterCard.(Star.(1:6))
+    ps::Dict{MonsterCard, Float16} = Dict((card, zero(Float16)) for card in all_cards)
+    for (up, n) in ups
+        hero::Hero = up.hero
+        target::Hero = up.target
+        if hero.upgrade > target.upgrade
+            if target.upgrade > star_cap(hero.star)
+                #
+            else
+                #
+            end
+        end
+    end
+    return ps
+end
+
+struct Probably{T}
+    prob::Prob
+    value::T
+end
+const Distrib{T} = Dict{T, Prob}
