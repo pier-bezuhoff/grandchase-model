@@ -1,7 +1,8 @@
 using Random
 using Distributions
+using DataStructures
 using Base.Iterators
-import Base: *, -, show, convert
+import Base: *, -, show, convert, isless
 
 @enum Star::UInt8 ☆=0x1 ☆☆ ☆☆☆ ☆☆☆☆ ☆☆☆☆☆ ☆☆☆☆☆☆
 *(n::Int, s::Star)::Star =
@@ -20,6 +21,8 @@ struct CardSymbol end
 const MC = CardSymbol()
 *(i::Int, ::CardSymbol)::Card =
     Card(Star(i))
+isless(c0::Card, c::Card)::Bool =
+    isless(c0.star, c.star)
 show(io::IO, card::Card) =
     print(io, "MC ", card.star)
 const all_cards = Card.(Star.(0x1:0x6))
@@ -81,9 +84,8 @@ show(io::IO, up::HeroUpgrade) =
 ↦(hero::Hero, target::Hero)::HeroUpgrade =
     HeroUpgrade(hero, target)
 
-#const Prob = Rational{Int} # try/cmp performance
-#const Prob = Float32
-const Prob = Float16
+# const Prob = Rational{Int} # try/cmp performance
+const Prob = Float32
 const ProbBonus = Prob
 
 function _rel_prob(d::Int8)::Prob
@@ -121,7 +123,10 @@ end
 show(io::IO, x::HeroUpgradeResult) =
     print(io, "HUR($(x.hero), $(x.n_used_cards) cards used)")
 
-function simulate_hero_upgrade(up::HeroUpgrade, cards)::HeroUpgradeResult
+function simulate_hero_upgrade(
+    up::HeroUpgrade, cards;
+    ignore_low_star_cards::Bool=false
+)::HeroUpgradeResult
     hero::Hero = up.hero
     target::Hero = up.target
     lvl::UpgradeLvl = hero.upgrade
@@ -140,8 +145,8 @@ function simulate_hero_upgrade(up::HeroUpgrade, cards)::HeroUpgradeResult
         monster_star::Star = card.star
         if star - monster_star > 0x4
             n_used_cards += 1
-            continue
-            # error("cannot use low star monster cards")
+            ignore_low_star_cards && continue
+            error("cannot use low star monster cards")
         end
         prob::Prob = min(rel_prob(star, monster_star) + prob_bonus, one(Prob))
         result::Int = rand(Bernoulli(prob), 1)[]
@@ -160,38 +165,47 @@ function simulate_hero_upgrade(up::HeroUpgrade, cards)::HeroUpgradeResult
     end
     return HeroUpgradeResult(Hero(star, lvl), n_used_cards)
 end
-# simulate onine methods (batch after batch)
 
 const Price = Float32
 const Prices{T} = Dict{T, Price}
 const CardPrices = Prices{Card}
 
-function expected_n_cards(
+function expected_price(
     up::HeroUpgrade, cards::Vector{Card};
     prices::CardPrices = CardPrices((card, one(Price)) for card in all_cards),
-    n_attempts::Int=10000
-)::FPrice
+    n_attempts::Int=10_000,
+    ignore_low_star_cards::Bool=false
+)::Price
     cards = cycle(cards)
     average::Price = zero(Price)
-    # TODO: try mean([...])
     for attempt in 1:n_attempts
-        hur = simulate_hero_upgrade(up, cards)
-        price::Price = sum(map(card -> prices[card], cards[1:hur.n_used_cards]))
+        hur = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
+        price::Price = sum(map(card -> prices[card], take(cards, hur.n_used_cards)))
         average += price / n_attempts
     end
     return average
 end
 
-function expected_n_cards(up::HeroUpgrade, card::Card; n_attempts::Int=10000)::Price
-    return expected_n_cards(up, [card]; n_attempts=n_attempts)
+function expected_n_cards(
+    up::HeroUpgrade, card::Card;
+    n_attempts::Int=10_000,
+    ignore_low_star_cards::Bool=false
+)::Float32
+    return expected_price(
+        up, [card],
+        prices=CardPrices(card => one(Price)),
+        n_attempts=n_attempts,
+        ignore_low_star_cards=ignore_low_star_cards
+    )
 end
 
 # NOTE: priceXdNL ≈ N priceXd1L -- experimental fact
 const price0d1L = 1.0  # * 5MC : H50 -> H51
-const price1d1L = 1.71 # * 4MC : H50 -> H51 # TODO: check: why not 2
+const price1d1L = 1.71 # * 4MC : H50 -> H51
 const price2d1L = 2.86 # * 3MC : H50 -> H51
 const price3d1L = 5.23 # * 2MC : H50 -> H51
 const price4d1L = 31.8 # * 1MC : H50 -> H51
+# USE: expected_n_cards(50H ↦ 59H, ?MC; n_attempts=1_000_000)/9
 
 function price(d::Int8)::Price
     if d <= 0x0 1/price0d1L
@@ -208,8 +222,8 @@ const indefinite = Indefinite()
 const Many{T} = Dict{T, Int}
 const Much{T} = Dict{T, Union{Int, Indefinite}}
 
-function prices(ups::Many{HeroUpgrade})::Prices{Card}
-    ps::Prices{Card} = Dict((card, zero(Float16)) for card in all_cards)
+function prices(ups::Many{HeroUpgrade})::CardPrices
+    ps::CardPrices = CardPrices((card, zero(Price)) for card in all_cards)
     for (up, n) in ups
         hero::Hero = up.hero
         target::Hero = up.target
@@ -232,13 +246,32 @@ end
 
 const example = prices(Dict(
     30A ↦ 33A => 20,
-    40A ↦ 46A => 20,
+    40A ↦ 46A => 15,
     50A ↦ 59A => 5,
     40S ↦ 59S => 10,
-    59S ↦ 612S => 5,
+    40S ↦ 612S => 5,
+    60S ↦ 612S => 8,
 ))
 
-function online_chooser(up::HeroUpgrade, prices::Dict{Card, Float16}, cards::Dict{Card, Int}; look_ahead::Int=10, n_attempts::Int=100)
+# eval best infinite steam of cards
+function simple_chooser(up::HeroUpgrade, prices::CardPrices; n_attempts::Int=1_000)::SortedDict{Card, Tuple{Price, Float32}}
+    result::SortedDict{Card, Tuple{Price, Float32}} = SortedDict()
+    for (card, price) in prices
+        up.target.star == Star(0x6) && card == 1MC && continue # low star MC cannot upgrade high star Hero
+        n::Float32 = expected_n_cards(up, card, n_attempts=n_attempts)
+        result[card] = (n * price, n)
+    end
+    return result
+end
+
+# TODO: cur. count + honor shop 1-3 MC => prices
+
+#=
+function online_chooser(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card},
+    look_ahead::Int = 10,
+    n_attempts::Int = 100
+)
     hero::Hero = up.hero
     target::Hero = up.target
     function next(result::Union{Nothing,Bool} = nothing)::Card
@@ -253,8 +286,9 @@ function online_chooser(up::HeroUpgrade, prices::Dict{Card, Float16}, cards::Dic
     end
     return next
 end
+=#
 
-sort(collect(GrandChase.example), by = p -> UInt8(p.first.star), rev = true)
+SortedDict(example)
 
 #=
 struct Probably{T}
