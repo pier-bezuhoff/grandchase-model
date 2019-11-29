@@ -1,8 +1,9 @@
 using Random
 using Distributions
 using DataStructures
+using Combinatorics
 using Base.Iterators
-import Base: *, -, show, convert, isless
+import Base: *, -, show, convert, isless, iterate
 
 @enum Star::UInt8 ☆=0x1 ☆☆ ☆☆☆ ☆☆☆☆ ☆☆☆☆☆ ☆☆☆☆☆☆
 *(n::Int, s::Star)::Star =
@@ -58,6 +59,9 @@ struct Hero
         rank == S && UInt8(star) >= 0x4 ||
         rank == SR && UInt8(star) >= 0x5 || error("hero star capped by rank")
         new(rank, star, upgrade)
+    end
+    function Hero(star::Star, upgrade::UpgradeLvl)::Hero
+        return Hero(H, star, upgrade)
     end
 end
 show(io::IO, hero::Hero) =
@@ -122,6 +126,11 @@ struct HeroUpgradeResult
 end
 show(io::IO, x::HeroUpgradeResult) =
     print(io, "HUR($(x.hero), $(x.n_used_cards) cards used)")
+function iterate(hur::HeroUpgradeResult, s=1)
+    s == 1 && return (hur.hero, 2)
+    s == 2 && return (hur.n_used_cards, 3)
+    s == 3 && return nothing
+end
 
 function simulate_hero_upgrade(
     up::HeroUpgrade, cards;
@@ -168,6 +177,7 @@ end
 
 const Price = Float32
 const Prices{T} = Dict{T, Price}
+const Progress = Float32
 const CardPrices = Prices{Card}
 
 function expected_price(
@@ -179,8 +189,8 @@ function expected_price(
     cards = cycle(cards)
     average::Price = zero(Price)
     for attempt in 1:n_attempts
-        hur = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
-        price::Price = sum(map(card -> prices[card], take(cards, hur.n_used_cards)))
+        (h, n) = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
+        price::Price = sum(map(card -> prices[card], take(cards, n)))
         average += price / n_attempts
     end
     return average
@@ -253,7 +263,7 @@ const example = prices(Dict(
     60S ↦ 612S => 8,
 ))
 
-# eval best infinite steam of cards
+# eval best infinite stream of cards
 function simple_chooser(up::HeroUpgrade, prices::CardPrices; n_attempts::Int=1_000)::SortedDict{Card, Tuple{Price, Float32}}
     result::SortedDict{Card, Tuple{Price, Float32}} = SortedDict()
     for (card, price) in prices
@@ -266,17 +276,74 @@ end
 
 # TODO: cur. count + honor shop 1-3 MC => prices
 
+function many_cards(mc1::Int=0, mc2::Int=0, mc3::Int=0, mc4::Int=0, mc5::Int=0, mc6::Int=0)::Many{Card}
+    return Many{Card}(1MC=>mc1, 2MC=>mc2, 3MC=>mc3, 4MC=>mc4, 5MC=>mc5, 6MC=>mc6)
+end
+
+function many_permutations(xs::Many{X}, n::Int) where {X}
+    return multiset_permutations(collect(keys(xs)), collect(values(xs)), n)
+end
+
+# Many(1MC => 0, 2MC => 0, 3MC => 0, 4MC => 0, 5MC => 0, 6MC => 0)
+function best_sequences(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
+    look_ahead::Int = 10,
+    n_attempts::Int = 100,
+    n_variants::Int=10
+):: PriorityQueue{Vector{Card}, Tuple{Float32, Progress}}
+    hero::Hero = up.hero
+    target::Hero = up.target
+    # keeps max n_variants best sequences in reversed order
+    queue::PriorityQueue = PriorityQueue{Tuple{Vector{Card}, Progress}, Float32}()
+    for sequence in many_permutations(cards, look_ahead)
+        average_progress::Progress = zero(Progress)
+        efficiency::Float32 = zero(Float32)
+        for _ in 1:n_attempts
+            (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
+            progress::Progress = 100*h.upgrade/target.upgrade
+            price::Price = sum(map(c -> prices[c], take(sequence, n)))
+            average_progress += progress/n_attempts
+            efficiency += progress/(price*n_attempts)
+        end
+        if length(queue) < n_variants
+            queue[(sequence, average_progress)] = efficiency
+        elseif peek(queue).second < efficiency
+            dequeue!(queue)
+            queue[(sequence, average_progress)] = efficiency
+        end
+        # println(collect(sequence), "progress=", average_progress, " efficiency=", efficiency)
+    end
+    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in queue)
+end
+
 #=
 function online_chooser(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card},
     look_ahead::Int = 10,
-    n_attempts::Int = 100
+    n_attempts::Int = 100;
+    n_variants::Int=10
 )
     hero::Hero = up.hero
     target::Hero = up.target
-    function next(result::Union{Nothing,Bool} = nothing)::Card
-        for cs in combinations of look_ahead cards
-            #
+    function next(result::Union{Nothing,Bool}=nothing)::Card
+        # keeps max n_variants best sequences in reversed order
+        best_sequences::PriorityQueue = PriorityQueue{(Vector{Card}, Progress), Float32}(Base.Order.Reverse)
+        for sequence in many_permutations(cards, look_ahead)
+            average_progress::progress = zero(Progress)
+            average_cost::Float32 = zero(Float32)
+            for _ in 1:n_attempts
+                (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
+                progress::progress = h.upgrade/target.upgrade
+                price::Price = sum(map(c -> prices[c], take(n, sequence)))
+                average_progress += progress/n_attempts
+                average_cost += price/(progress*n_attempts)
+            end
+            if length(best_sequences) < n_variants
+                best_sequences[(sequence, average_progress)] = average_cost
+            else if peek(best_sequences).second > average_cost
+                dequeue!(best_sequences)
+                best_sequences[(sequence, average_progress)] = average_cost
+            end
         end
         if result === nothing
             #first turn
@@ -287,9 +354,6 @@ function online_chooser(
     return next
 end
 =#
-
-SortedDict(example)
-
 #=
 struct Probably{T}
     prob::Prob
@@ -297,3 +361,34 @@ struct Probably{T}
 end
 const Distrib{T} = Dict{T, Prob}
 =#
+
+# simple_chooser(30A ↦ 33A, example) =
+  # MC ☆      => (42.5726, 8.57915)
+  # MC ☆☆     => (58.7123, 5.15569)
+  # MC ☆☆☆    => (64.9155, 2.99991)
+  # MC ☆☆☆☆   => (105.047, 2.99991)
+  # MC ☆☆☆☆☆  => (134.312, 2.99991)
+  # MC ☆☆☆☆☆☆ => (152.995, 2.99991)
+
+# simple_chooser(40S ↦ 46S, example) =
+  # MC ☆      => (155.324, 31.3006)
+  # MC ☆☆     => (195.823, 17.1957)
+  # MC ☆☆☆    => (222.142, 10.2657)
+  # MC ☆☆☆☆   => (210.094, 5.99982)
+  # MC ☆☆☆☆☆  => (268.624, 5.99982)
+  # MC ☆☆☆☆☆☆ => (305.991, 5.99982)
+
+# simple_chooser(56S ↦ 59S, example) =
+  # MC ☆      => (473.178, 95.354)
+  # MC ☆☆     => (179.108, 15.728)
+  # MC ☆☆☆    => (185.828, 8.58757)
+  # MC ☆☆☆☆   => (180.49, 5.1544)
+  # MC ☆☆☆☆☆  => (134.312, 2.99991)
+  # MC ☆☆☆☆☆☆ => (152.995, 2.99991)
+
+# simple_chooser(60S ↦ 612S, example) =
+  # MC ☆☆     => (4355.21, 382.443)
+  # MC ☆☆☆    => (1360.22, 62.8593)
+  # MC ☆☆☆☆   => (1208.01, 34.4982)
+  # MC ☆☆☆☆☆  => (916.823, 20.4776)
+  # MC ☆☆☆☆☆☆ => (611.982, 11.9996)
