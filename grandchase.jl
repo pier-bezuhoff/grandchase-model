@@ -42,7 +42,7 @@ function star_cap(star::Star)::UpgradeLvl
     elseif star == ☆☆☆☆ UpgradeLvl(6)
     elseif star == ☆☆☆☆☆ UpgradeLvl(9)
     elseif star == ☆☆☆☆☆☆ UpgradeLvl(12)
-    else UpgradeLvl(0) # bad
+    else error("impossible hero star")
     end
 end
 
@@ -126,11 +126,11 @@ struct HeroUpgradeResult
 end
 show(io::IO, x::HeroUpgradeResult) =
     print(io, "HUR($(x.hero), $(x.n_used_cards) cards used)")
-function iterate(hur::HeroUpgradeResult, s=1)
-    s == 1 && return (hur.hero, 2)
-    s == 2 && return (hur.n_used_cards, 3)
-    s == 3 && return nothing
-end
+iterate(hur::HeroUpgradeResult, s=1) =
+    if s == 1 (hur.hero, 2)
+    elseif s == 2 (hur.n_used_cards, 3)
+    else nothing
+    end
 
 function simulate_hero_upgrade(
     up::HeroUpgrade, cards;
@@ -178,35 +178,43 @@ end
 const Price = Float32
 const Prices{T} = Dict{T, Price}
 const Progress = Float32
+const AverageCount = Float32
+const Efficiency = Float32 # progress % / price
 const CardPrices = Prices{Card}
+const Stat = NamedTuple{(:efficiency, :progress, :price), Tuple{Efficiency, Progress, Price}}
 
-function expected_price(
-    up::HeroUpgrade, cards::Vector{Card};
-    prices::CardPrices = CardPrices((card, one(Price)) for card in all_cards),
+function expected_stat(
+    up::HeroUpgrade, cards, prices::CardPrices;
     n_attempts::Int=10_000,
     ignore_low_star_cards::Bool=false
-)::Price
-    cards = cycle(cards)
-    average::Price = zero(Price)
+)::Stat
+    target::Hero = up.target
+    average_efficiency::Efficiency = zero(Efficiency)
+    average_progress::Progress = zero(Progress)
+    average_price::Price = zero(Price)
     for attempt in 1:n_attempts
         (h, n) = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
         price::Price = sum(map(card -> prices[card], take(cards, n)))
-        average += price / n_attempts
+        progress::Progress = 100*h.upgrade/target.upgrade
+        average_efficiency += progress/(price*n_attempts)
+        average_progress += progress/n_attempts
+        average_price += price/n_attempts
     end
-    return average
+    return Stat((average_efficiency, average_progress, average_price))
 end
 
 function expected_n_cards(
     up::HeroUpgrade, card::Card;
     n_attempts::Int=10_000,
     ignore_low_star_cards::Bool=false
-)::Float32
-    return expected_price(
-        up, [card],
+)::AverageCount
+    (efficiency, progress, n_cards) = expected_stat(
+        up, cycle([card]),
         prices=CardPrices(card => one(Price)),
         n_attempts=n_attempts,
         ignore_low_star_cards=ignore_low_star_cards
     )
+    return n_cards
 end
 
 # NOTE: priceXdNL ≈ N priceXd1L -- experimental fact
@@ -227,10 +235,7 @@ function price(d::Int8)::Price
     end
 end
 
-struct Indefinite end # indicates potential infinity
-const indefinite = Indefinite()
 const Many{T} = Dict{T, Int}
-const Much{T} = Dict{T, Union{Int, Indefinite}}
 
 function prices(ups::Many{HeroUpgrade})::CardPrices
     ps::CardPrices = CardPrices((card, zero(Price)) for card in all_cards)
@@ -264,12 +269,15 @@ const example = prices(Dict(
 ))
 
 # eval best infinite stream of cards
-function simple_chooser(up::HeroUpgrade, prices::CardPrices; n_attempts::Int=1_000)::SortedDict{Card, Tuple{Price, Float32}}
-    result::SortedDict{Card, Tuple{Price, Float32}} = SortedDict()
+function simple_chooser(
+    up::HeroUpgrade, prices::CardPrices;
+    n_attempts::Int=1_000
+)::PriorityQueue{Card, Tuple{Price, AverageCount}}
+    pq::PriorityQueue{Card, Tuple{Price, AverageCount}} = PriorityQueue()
     for (card, price) in prices
         up.target.star == Star(0x6) && card == 1MC && continue # low star MC cannot upgrade high star Hero
-        n::Float32 = expected_n_cards(up, card, n_attempts=n_attempts)
-        result[card] = (n * price, n)
+        n::AverageCount = expected_n_cards(up, card, n_attempts=n_attempts)
+        enqueue!(pq, card => (n * price, n))
     end
     return result
 end
@@ -290,30 +298,26 @@ function best_sequences(
     look_ahead::Int = 10,
     n_attempts::Int = 100,
     n_variants::Int=10
-):: PriorityQueue{Vector{Card}, Tuple{Float32, Progress}}
+):: PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
     hero::Hero = up.hero
     target::Hero = up.target
     # keeps max n_variants best sequences in reversed order
-    queue::PriorityQueue = PriorityQueue{Tuple{Vector{Card}, Progress}, Float32}()
+    pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
+    # MAYBE: choose combinations and max progress of permutations
     for sequence in many_permutations(cards, look_ahead)
-        average_progress::Progress = zero(Progress)
-        efficiency::Float32 = zero(Float32)
-        for _ in 1:n_attempts
-            (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
-            progress::Progress = 100*h.upgrade/target.upgrade
-            price::Price = sum(map(c -> prices[c], take(sequence, n)))
-            average_progress += progress/n_attempts
-            efficiency += progress/(price*n_attempts)
+        (efficiency, progress, price) = expected_stat(
+            up, sequence, prices,
+            n_attempts=n_attempts,
+            ignore_low_star_cards=true
+        )
+        if length(pq) < n_variants
+            enqueue!(pq, (sequence, progress) => efficiency)
+        elseif peek(pq).second < efficiency
+            dequeue!(pq)
+            enqueue!(pq, (sequence, progress) => efficiency)
         end
-        if length(queue) < n_variants
-            queue[(sequence, average_progress)] = efficiency
-        elseif peek(queue).second < efficiency
-            dequeue!(queue)
-            queue[(sequence, average_progress)] = efficiency
-        end
-        # println(collect(sequence), "progress=", average_progress, " efficiency=", efficiency)
     end
-    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in queue)
+    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
 #=
