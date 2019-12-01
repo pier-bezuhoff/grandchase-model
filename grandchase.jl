@@ -3,7 +3,7 @@ using Distributions
 using DataStructures
 using Combinatorics
 using Base.Iterators
-import Base: *, -, show, convert, isless, iterate
+import Base: *, -, >, show, convert, isless, iterate
 
 @enum Star::UInt8 ☆=0x1 ☆☆ ☆☆☆ ☆☆☆☆ ☆☆☆☆☆ ☆☆☆☆☆☆
 *(n::Int, s::Star)::Star =
@@ -25,7 +25,7 @@ const MC = CardSymbol()
 isless(c0::Card, c::Card)::Bool =
     isless(c0.star, c.star)
 show(io::IO, card::Card) =
-    print(io, "MC ", card.star)
+    print(io, Int(card.star), "MC")
 const all_cards = Card.(Star.(0x1:0x6))
 const game_price_MC1 = 5 # in honor shop
 const game_price_MC2 = 15
@@ -37,7 +37,7 @@ const L = LvlSymbol()
 *(n::Int, ::LvlSymbol)::UpgradeLvl =
     UpgradeLvl(n)
 
-function star_cap(star::Star)::UpgradeLvl
+@inline function star_cap(star::Star)::UpgradeLvl
     if star == ☆☆☆ UpgradeLvl(3)
     elseif star == ☆☆☆☆ UpgradeLvl(6)
     elseif star == ☆☆☆☆☆ UpgradeLvl(9)
@@ -72,6 +72,24 @@ function *(n::Int, rank::HeroRank)::Hero
     n_digits >= 2 || error("should have >= 2 digits: first — n stars, then — upgrade lvl")
     return Hero(rank, Star(last(ds)), UpgradeLvl(n % 10 ^ (n_digits - 1)))
 end
+@inline function inc_to(hero::Hero, target::Hero)::Hero
+    lvl::UpgradeLvl = hero.upgrade
+    star::Star = hero.star
+    target_lvl::UpgradeLvl = target.upgrade
+    target_star::Star = target.star
+    hero.rank != target.rank && error("different hero ranks")
+    star > target_star && error("target star < hero star")
+    lvl > target_lvl && error("target upgrade < hero upgrade")
+    if lvl == target_lvl
+        return target
+    end
+    cap::UpgradeLvl = star_cap(star)
+    if lvl == cap || lvl + 1 == cap && star < target_star
+        star = inc(star)
+    end
+    lvl += one(UpgradeLvl)
+    return Hero(hero.rank, star, lvl)
+end
 
 struct HeroUpgrade
     hero::Hero
@@ -85,14 +103,14 @@ struct HeroUpgrade
 end
 show(io::IO, up::HeroUpgrade) =
     print(io, up.hero, " ↦ ", up.target)
-↦(hero::Hero, target::Hero)::HeroUpgrade =
+>(hero::Hero, target::Hero)::HeroUpgrade =
     HeroUpgrade(hero, target)
 
 # const Prob = Rational{Int} # try/cmp performance
 const Prob = Float32
 const ProbBonus = Prob
 
-function _rel_prob(d::Int8)::Prob
+@inline function _rel_prob(d::Int8)::Prob
     if d < 0x1 Prob(1)
     elseif d == 0x1 Prob(1//2)
     elseif d == 0x2 Prob(1//4)
@@ -102,11 +120,11 @@ function _rel_prob(d::Int8)::Prob
     end
 end
 
-function rel_prob(star::Star, monster_star::Star)::Prob
+@inline function rel_prob(star::Star, monster_star::Star)::Prob
     _rel_prob(star - monster_star)
 end
 
-function _rel_prob_bonus(d::Int8)::ProbBonus
+@inline function _rel_prob_bonus(d::Int8)::ProbBonus
     if d < 0x1 zero(ProbBonus)
     elseif d == 0x1 ProbBonus(15//100)
     elseif d == 0x2 ProbBonus(7//100)
@@ -116,7 +134,7 @@ function _rel_prob_bonus(d::Int8)::ProbBonus
     end
 end
 
-function rel_prob_bonus(star::Star, monster_star::Star)::ProbBonus
+@inline function rel_prob_bonus(star::Star, monster_star::Star)::ProbBonus
     _rel_prob_bonus(star - monster_star)
 end
 
@@ -225,7 +243,7 @@ const price3d1L = 5.23 # * 2MC : H50 -> H51
 const price4d1L = 31.8 # * 1MC : H50 -> H51
 # USE: expected_n_cards(50H ↦ 59H, ?MC; n_attempts=1_000_000)/9
 
-function price(d::Int8)::Price
+@inline function price(d::Int8)::Price
     if d <= 0x0 1/price0d1L
     elseif d == 0x1 1/price1d1L
     elseif d == 0x2 1/price2d1L
@@ -260,12 +278,12 @@ function prices(ups::Many{HeroUpgrade})::CardPrices
 end
 
 const example = prices(Dict(
-    30A ↦ 33A => 20,
-    40A ↦ 46A => 15,
-    50A ↦ 59A => 5,
-    40S ↦ 59S => 10,
-    40S ↦ 612S => 5,
-    60S ↦ 612S => 8,
+    30A > 33A => 20,
+    40A > 46A => 15,
+    50A > 59A => 5,
+    40S > 59S => 10,
+    40S > 612S => 5,
+    60S > 612S => 8,
 ))
 
 # eval best infinite stream of cards
@@ -284,15 +302,16 @@ end
 
 # TODO: cur. count + honor shop 1-3 MC => prices
 
-function many_cards(mc1::Int=0, mc2::Int=0, mc3::Int=0, mc4::Int=0, mc5::Int=0, mc6::Int=0)::Many{Card}
+@inline function many_cards(mc1::Int=0, mc2::Int=0, mc3::Int=0, mc4::Int=0, mc5::Int=0, mc6::Int=0)::Many{Card}
     return Many{Card}(1MC=>mc1, 2MC=>mc2, 3MC=>mc3, 4MC=>mc4, 5MC=>mc5, 6MC=>mc6)
 end
 
-function many_permutations(xs::Many{X}, n::Int) where {X}
+@inline function many_permutations(xs::Many{X}, n::Int) where {X}
     return multiset_permutations(collect(keys(xs)), collect(values(xs)), n)
 end
 
-# Many(1MC => 0, 2MC => 0, 3MC => 0, 4MC => 0, 5MC => 0, 6MC => 0)
+const cards_example = many_cards(6, 108, 221, 24, 6)
+
 function best_sequences(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     look_ahead::Int = 10,
@@ -358,13 +377,93 @@ function online_chooser(
     return next
 end
 =#
-#=
+
 struct Probably{T}
     prob::Prob
     value::T
 end
 const Distrib{T} = Dict{T, Prob}
-=#
+const PHURDistrib = Vector{Tuple{HeroUpgradeResult, ProbBonus, Prob}}
+
+function hero_upgrade_distrib(
+    up::HeroUpgrade, cards::Vector{Card};
+    prob_threshold::Prob=Prob(1e-5)
+)::Distrib{HeroUpgradeResult}
+    phurd = hero_upgrade_distrib(
+        up, list(cards...),
+        PHURDistrib([(HeroUpgradeResult(up.hero, 0), zero(ProbBonus), one(Prob))]),
+        prob_threshold=prob_threshold
+    )
+    d::Distrib{HeroUpgradeResult}=Distrib{HeroUpgradeResult}()
+    for (hur, pb, p) in phurd
+        if haskey(d, hur)
+            d[hur] += p
+        else
+            d[hur] = p
+        end
+    end
+    return d
+end
+
+function hero_upgrade_distrib(
+    up::HeroUpgrade, cards::LinkedList{Card}, distrib::PHURDistrib;
+    prob_threshold::Prob=Prob(1e-5)
+)::PHURDistrib
+    isempty(cards) && return distrib
+    target::Hero = up.target
+    card::Card = cards.head
+    card_star::Star = card.star
+    next_cards::LinkedList{Card} = cards.tail
+    next_distrib::PHURDistrib = PHURDistrib()
+    for (hur, pb, p) in distrib
+        if hur.hero.upgrade == up.target.upgrade
+            push!(next_distrib, (hur, pb, p))
+        else
+            (hero, n_used_cards) = hur
+            prob::Prob = min(rel_prob(hero.star, card_star) + pb, one(Prob))
+            good_prob::Prob = p * prob
+            if good_prob > prob_threshold
+                good = (HeroUpgradeResult(inc_to(hero, target), n_used_cards + 1), zero(ProbBonus), good_prob)
+                push!(next_distrib, good)
+            end
+            bad_prob::Prob = p - good_prob
+            if bad_prob > prob_threshold
+                bad = (HeroUpgradeResult(hero, n_used_cards + 1), pb + rel_prob_bonus(hero.star, card_star), bad_prob)
+                push!(next_distrib, bad)
+            end
+        end
+    end
+    return hero_upgrade_distrib(up, next_cards, next_distrib, prob_threshold=prob_threshold)
+end
+
+struct HeroUpgradeStat
+    up::HeroUpgrade
+    cards::Vector{Card}
+    distrib::Distrib{HeroUpgradeResult}
+    HeroUpgradeStat(up::HeroUpgrade, cards::Vector{Card}) =
+        new(up, cards, hero_upgrade_distrib(up, cards))
+end
+function show(io::IO, hus::HeroUpgradeStat)
+    up::HeroUpgrade = hus.up
+    cards::Vector{Card} = hus.cards
+    distrib::Distrib{HeroUpgradeResult} = hus.distrib
+    println(io, "HUS ($up) by $cards:")
+    target::Hero = up.target
+    average_progress::Progress = zero(Progress)
+    average_progess_per_card::Efficiency = zero(Efficiency)
+    average_n_card_used::AverageCount = zero(AverageCount)
+    for ((h, n), p) in sort(collect(distrib), by=kv -> kv.first.hero.upgrade, rev=true)
+        p100 = round(100Float64(p), sigdigits=5)
+        progress = round(100Float64(h.upgrade/target.upgrade), sigdigits=4)
+        println(io, "    $(p100)%\t=> H $(h.star) $(Int(h.upgrade))/$(Int(target.upgrade))L (progress $(progress)%, $n cards used)")
+        average_progress += p*progress
+        average_progess_per_card += p*progress/n
+        average_n_card_used += p*n
+    end
+    println(io, "av. progress = $(round(average_progress, sigdigits=4))% = $(round(average_progress*target.upgrade/100, sigdigits=4))L, av. progress per card = $(round(average_progess_per_card, sigdigits=4)), av. used cards = $(round(average_n_card_used, sigdigits=3))")
+end
+
+# struct HeroUpgradeStat+
 
 # simple_chooser(30A ↦ 33A, example) =
   # MC ☆      => (42.5726, 8.57915)
