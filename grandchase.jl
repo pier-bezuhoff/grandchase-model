@@ -72,12 +72,16 @@ function *(n::Int, rank::HeroRank)::Hero
     n_digits >= 2 || error("should have >= 2 digits: first — n stars, then — upgrade lvl")
     return Hero(rank, Star(last(ds)), UpgradeLvl(n % 10 ^ (n_digits - 1)))
 end
+iterate(hero::Hero, s=1) =
+    if s == 1 (hero.rank, 2)
+    elseif s == 2 (hero.star, 3)
+    elseif s == 3 (hero.upgrade, 4)
+    else nothing
+    end
 @inline function inc_to(hero::Hero, target::Hero)::Hero
-    lvl::UpgradeLvl = hero.upgrade
-    star::Star = hero.star
-    target_lvl::UpgradeLvl = target.upgrade
-    target_star::Star = target.star
-    hero.rank != target.rank && error("different hero ranks")
+    (rank, star, lvl) = hero
+    (target_rank, target_star, target_lvl) = target
+    rank != target_rank && error("different hero ranks")
     star > target_star && error("target star < hero star")
     lvl > target_lvl && error("target upgrade < hero upgrade")
     if lvl == target_lvl
@@ -105,6 +109,11 @@ show(io::IO, up::HeroUpgrade) =
     print(io, up.hero, " ↦ ", up.target)
 >(hero::Hero, target::Hero)::HeroUpgrade =
     HeroUpgrade(hero, target)
+iterate(up::HeroUpgrade, s=1) =
+    if s == 1 (up.hero, 2)
+    elseif s == 2 (up.target, 3)
+    else nothing
+    end
 
 # const Prob = Rational{Int} # try/cmp performance
 const Prob = Float32
@@ -154,12 +163,9 @@ function simulate_hero_upgrade(
     up::HeroUpgrade, cards;
     ignore_low_star_cards::Bool=false
 )::HeroUpgradeResult
-    hero::Hero = up.hero
-    target::Hero = up.target
-    lvl::UpgradeLvl = hero.upgrade
-    star::Star = hero.star
-    target_lvl::UpgradeLvl = target.upgrade
-    target_star::Star = target.star
+    (hero, target) = up
+    (_, star, lvl) = hero
+    (_, target_star, target_lvl) = target
     prob_bonus::ProbBonus = zero(ProbBonus)
     if isempty(cards) || lvl >= target_lvl
         return HeroUpgradeResult(hero, 0)
@@ -206,14 +212,14 @@ function expected_stat(
     n_attempts::Int=10_000,
     ignore_low_star_cards::Bool=false
 )::Stat
-    target::Hero = up.target
+    ((_,_,lvl0), (_,_,lvl1)) = up.target
     average_efficiency::Efficiency = zero(Efficiency)
     average_progress::Progress = zero(Progress)
     average_price::Price = zero(Price)
     for attempt in 1:n_attempts
-        (h, n) = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
+        ((_,_,lvl), n) = simulate_hero_upgrade(up, cards, ignore_low_star_cards=ignore_low_star_cards)
         price::Price = sum(map(card -> prices[card], take(cards, n)))
-        progress::Progress = 100*h.upgrade/target.upgrade
+        progress::Progress = 100*(lvl-lvl0)/(lvl1-lvl0)
         average_efficiency += progress/(price*n_attempts)
         average_progress += progress/n_attempts
         average_price += price/n_attempts
@@ -258,8 +264,7 @@ const Many{T} = Dict{T, Int}
 function prices(ups::Many{HeroUpgrade})::CardPrices
     ps::CardPrices = CardPrices((card, zero(Price)) for card in all_cards)
     for (up, n) in ups
-        hero::Hero = up.hero
-        target::Hero = up.target
+        (hero, target) = up
         if hero.upgrade < target.upgrade
             before_star_cap::UpgradeLvl = star_cap(hero.star) - hero.upgrade
             for card in all_cards
@@ -277,7 +282,7 @@ function prices(ups::Many{HeroUpgrade})::CardPrices
     return ps
 end
 
-const example = prices(Dict(
+const prices_example = prices(Dict(
     30A > 33A => 20,
     40A > 46A => 15,
     50A > 59A => 5,
@@ -312,77 +317,16 @@ end
 
 const cards_example = many_cards(6, 108, 221, 24, 6)
 
-function best_sequences(
-    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
-    look_ahead::Int = 10,
-    n_attempts::Int = 100,
-    n_variants::Int=10
-):: PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
-    hero::Hero = up.hero
-    target::Hero = up.target
-    # keeps max n_variants best sequences in reversed order
-    pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
-    # MAYBE: choose combinations and max progress of permutations
-    for sequence in many_permutations(cards, look_ahead)
-        (efficiency, progress, price) = expected_stat(
-            up, sequence, prices,
-            n_attempts=n_attempts,
-            ignore_low_star_cards=true
-        )
-        if length(pq) < n_variants
-            enqueue!(pq, (sequence, progress) => efficiency)
-        elseif peek(pq).second < efficiency
-            dequeue!(pq)
-            enqueue!(pq, (sequence, progress) => efficiency)
-        end
-    end
-    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
-end
-
-#=
-function online_chooser(
-    up::HeroUpgrade, prices::CardPrices, cards::Many{Card},
-    look_ahead::Int = 10,
-    n_attempts::Int = 100;
-    n_variants::Int=10
-)
-    hero::Hero = up.hero
-    target::Hero = up.target
-    function next(result::Union{Nothing,Bool}=nothing)::Card
-        # keeps max n_variants best sequences in reversed order
-        best_sequences::PriorityQueue = PriorityQueue{(Vector{Card}, Progress), Float32}(Base.Order.Reverse)
-        for sequence in many_permutations(cards, look_ahead)
-            average_progress::progress = zero(Progress)
-            average_cost::Float32 = zero(Float32)
-            for _ in 1:n_attempts
-                (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
-                progress::progress = h.upgrade/target.upgrade
-                price::Price = sum(map(c -> prices[c], take(n, sequence)))
-                average_progress += progress/n_attempts
-                average_cost += price/(progress*n_attempts)
-            end
-            if length(best_sequences) < n_variants
-                best_sequences[(sequence, average_progress)] = average_cost
-            else if peek(best_sequences).second > average_cost
-                dequeue!(best_sequences)
-                best_sequences[(sequence, average_progress)] = average_cost
-            end
-        end
-        if result === nothing
-            #first turn
-        else
-            #>=2nd
-        end
-    end
-    return next
-end
-=#
-
-struct Probably{T}
-    prob::Prob
-    value::T
-end
 const Distrib{T} = Dict{T, Prob}
+
+function average(::Type{R}, f::Function, distrib::Distrib{X}) where {X, R <: Real}
+    av_f::R = zero(R)
+    for (x, p) in distrib
+        av_f += p * (f(x)::R)
+    end
+    return av_f
+end
+
 const PHURDistrib = Vector{Tuple{HeroUpgradeResult, ProbBonus, Prob}}
 
 function hero_upgrade_distrib(
@@ -440,31 +384,128 @@ struct HeroUpgradeStat
     up::HeroUpgrade
     cards::Vector{Card}
     distrib::Distrib{HeroUpgradeResult}
-    HeroUpgradeStat(up::HeroUpgrade, cards::Vector{Card}) =
-        new(up, cards, hero_upgrade_distrib(up, cards))
+    prices::Union{Missing, CardPrices}
+    HeroUpgradeStat(up::HeroUpgrade, cards::Vector{Card}, prices::Union{Missing, CardPrices}=missing) =
+        new(up, cards, hero_upgrade_distrib(up, cards), prices)
 end
 function show(io::IO, hus::HeroUpgradeStat)
     up::HeroUpgrade = hus.up
     cards::Vector{Card} = hus.cards
     distrib::Distrib{HeroUpgradeResult} = hus.distrib
+    prices = hus.prices
     println(io, "HUS ($up) by $cards:")
-    target::Hero = up.target
+    (hero, target) = up
     average_progress::Progress = zero(Progress)
-    average_progess_per_card::Efficiency = zero(Efficiency)
-    average_n_card_used::AverageCount = zero(AverageCount)
+    average_efficiency::Efficiency = zero(Efficiency)
     for ((h, n), p) in sort(collect(distrib), by=kv -> kv.first.hero.upgrade, rev=true)
-        p100 = round(100Float64(p), sigdigits=5)
-        progress = round(100Float64(h.upgrade/target.upgrade), sigdigits=4)
-        println(io, "    $(p100)%\t=> H $(h.star) $(Int(h.upgrade))/$(Int(target.upgrade))L (progress $(progress)%, $n cards used)")
-        average_progress += p*progress
-        average_progess_per_card += p*progress/n
-        average_n_card_used += p*n
+        progress = (h.upgrade - hero.upgrade)/(target.upgrade - hero.upgrade)
+        if prices === missing
+            efficiency = Efficiency(100progress/n)
+            efficiency_part = ""
+        else
+            efficiency = Efficiency(100progress/sum(map(c->prices[c], take(cards, n))))
+            efficiency_part = "with efficiency $(round(efficiency, sigdigits=3)) "
+        end
+        p100 = round(100p, sigdigits=5)
+        progress100 = round(100progress, sigdigits=4)
+        println(io, "    $(p100)%\t=> H $(h.star) $(Int(h.upgrade))/$(Int(target.upgrade))L (progress $(progress100)%, $efficiency_part$n cards used)")
+        average_progress += p*100*progress
+        average_efficiency += p*efficiency
     end
-    println(io, "av. progress = $(round(average_progress, sigdigits=4))% = $(round(average_progress*target.upgrade/100, sigdigits=4))L, av. progress per card = $(round(average_progess_per_card, sigdigits=4)), av. used cards = $(round(average_n_card_used, sigdigits=3))")
+    avp = round(average_progress, sigdigits=4)
+    avl = round(average_progress*target.upgrade/100, sigdigits=4)
+    ave = round(average_efficiency, sigdigits=4)
+    print(io, "av. progress = $avp% = $(avl)L, av. efficiency = $ave")
+end
+function efficiency_of(hus::HeroUpgradeStat)::Efficiency
+    ((_,_,lvl0),(_,_,lvl1)) = hus.up
+    if hus.prices === missing
+        return average(Efficiency, (((_,_,lvl),n),)->Efficiency(100(lvl-lvl0)/(n*(lvl1-lvl0))), hus.distrib)
+    else
+        return average(
+            Efficiency,
+            (((_,_,lvl), n),) -> Efficiency(100(lvl-lvl0)/((lvl1-lvl0) * sum(map(c->hus.prices[c], take(hus.cards, n))))),
+            hus.distrib
+        )
+    end
+end
+function progress_of(hus::HeroUpgradeStat)::Progress
+    ((_,_,lvl0),(_,_,lvl1)) = hus.up
+    return average(Progress, (((_,_,lvl),n),)->Progress(100(lvl-lvl0)/(lvl1-lvl0)), hus.distrib)
+end
+function price_of(hus::HeroUpgradeStat)::Price
+    hus.prices === missing && error("cannot compute av. price without card prices")
+    return average(Price, ((_,n),)->Price(sum(map(c->hus.prices[c], take(hus.cards, n)))), hus.distrib)
 end
 
-# struct HeroUpgradeStat+
+function best_sequences(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
+    look_ahead::Int = 10,
+    n_attempts::Int = 100,
+    n_variants::Int=10
+):: PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
+    (hero, target) = up
+    # keeps max n_variants best sequences in reversed order
+    pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
+    # MAYBE: choose combinations and max progress of permutations
+    for sequence in many_permutations(cards, look_ahead)
+        hus = HeroUpgradeStat(up, sequence, prices)
+        efficiency = efficiency_of(hus)
+        progress = progress_of(hus)
+        price = price_of(hus)
+        # (efficiency, progress, price) = expected_stat(
+        #     up, sequence, prices,
+        #     n_attempts=n_attempts,
+        #     ignore_low_star_cards=true
+        # )
+        if length(pq) < n_variants
+            enqueue!(pq, (sequence, progress) => efficiency)
+        elseif peek(pq).second < efficiency
+            dequeue!(pq)
+            enqueue!(pq, (sequence, progress) => efficiency)
+        end
+    end
+    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
+end
 
+#=
+function online_chooser(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card},
+    look_ahead::Int = 10,
+    n_attempts::Int = 100;
+    n_variants::Int=10
+)
+    hero::Hero = up.hero
+    target::Hero = up.target
+    function next(result::Union{Nothing,Bool}=nothing)::Card
+        # keeps max n_variants best sequences in reversed order
+        best_sequences::PriorityQueue = PriorityQueue{(Vector{Card}, Progress), Float32}(Base.Order.Reverse)
+        for sequence in many_permutations(cards, look_ahead)
+            average_progress::progress = zero(Progress)
+            average_cost::Float32 = zero(Float32)
+            for _ in 1:n_attempts
+                (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
+                progress::progress = h.upgrade/target.upgrade
+                price::Price = sum(map(c -> prices[c], take(n, sequence)))
+                average_progress += progress/n_attempts
+                average_cost += price/(progress*n_attempts)
+            end
+            if length(best_sequences) < n_variants
+                best_sequences[(sequence, average_progress)] = average_cost
+            else if peek(best_sequences).second > average_cost
+                dequeue!(best_sequences)
+                best_sequences[(sequence, average_progress)] = average_cost
+            end
+        end
+        if result === nothing
+            #first turn
+        else
+            #>=2nd
+        end
+    end
+    return next
+end
+=#
 # simple_chooser(30A ↦ 33A, example) =
   # MC ☆      => (42.5726, 8.57915)
   # MC ☆☆     => (58.7123, 5.15569)
