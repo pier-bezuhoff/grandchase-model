@@ -360,6 +360,7 @@ function hero_upgrade_distrib(
     next_cards::LinkedList{Card} = cards.tail
     next_distrib::PHURDistrib = PHURDistrib()
     for (hur, pb, p) in distrib
+        hur.hero.star - card.star >= 0x5 && continue # low mc cannot be used for high star hero
         if hur.hero.upgrade == up.target.upgrade
             push!(next_distrib, (hur, pb, p))
         else
@@ -367,7 +368,8 @@ function hero_upgrade_distrib(
             prob::Prob = min(rel_prob(hero.star, card_star) + pb, one(Prob))
             good_prob::Prob = p * prob
             if good_prob > prob_threshold
-                good = (HeroUpgradeResult(inc_to(hero, target), n_used_cards + 1), zero(ProbBonus), good_prob)
+                next_hero = inc_to(hero, target)
+                good = (HeroUpgradeResult(next_hero, n_used_cards + 1), zero(ProbBonus), good_prob)
                 push!(next_distrib, good)
             end
             bad_prob::Prob = p - good_prob
