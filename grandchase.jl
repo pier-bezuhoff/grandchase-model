@@ -261,7 +261,7 @@ end
 
 const Many{T} = Dict{T, Int}
 
-function prices(ups::Many{HeroUpgrade})::CardPrices
+function prices_of(ups::Many{HeroUpgrade})::CardPrices
     ps::CardPrices = CardPrices((card, zero(Price)) for card in all_cards)
     for (up, n) in ups
         (hero, target) = up
@@ -282,7 +282,7 @@ function prices(ups::Many{HeroUpgrade})::CardPrices
     return ps
 end
 
-const prices_example = prices(Dict(
+const prices_example = prices_of(Dict(
     30A > 33A => 20,
     40A > 46A => 15,
     50A > 59A => 5,
@@ -312,7 +312,7 @@ end
 end
 
 @inline function many_permutations(xs::Many{X}, n::Int) where {X}
-    return multiset_permutations(collect(keys(xs)), collect(values(xs)), n)
+    return multiset_permutations(collect(keys(xs)), collect(map(k -> k > n ? n : k, values(xs))), n)
 end
 
 const cards_example = many_cards(6, 108, 221, 24, 6)
@@ -331,11 +331,12 @@ const PHURDistrib = Vector{Tuple{HeroUpgradeResult, ProbBonus, Prob}}
 
 function hero_upgrade_distrib(
     up::HeroUpgrade, cards::Vector{Card};
+    prob_bonus::ProbBonus=zero(ProbBonus),
     prob_threshold::Prob=Prob(1e-5)
 )::Distrib{HeroUpgradeResult}
     phurd = hero_upgrade_distrib(
         up, list(cards...),
-        PHURDistrib([(HeroUpgradeResult(up.hero, 0), zero(ProbBonus), one(Prob))]),
+        PHURDistrib([(HeroUpgradeResult(up.hero, 0), prob_bonus, one(Prob))]),
         prob_threshold=prob_threshold
     )
     d::Distrib{HeroUpgradeResult}=Distrib{HeroUpgradeResult}()
@@ -387,8 +388,12 @@ struct HeroUpgradeStat
     cards::Vector{Card}
     distrib::Distrib{HeroUpgradeResult}
     prices::Union{Missing, CardPrices}
-    HeroUpgradeStat(up::HeroUpgrade, cards::Vector{Card}, prices::Union{Missing, CardPrices}=missing) =
-        new(up, cards, hero_upgrade_distrib(up, cards), prices)
+    HeroUpgradeStat(
+        up::HeroUpgrade, cards::Vector{Card},
+        prices::Union{Missing, CardPrices}=missing,
+        initial_prob_bonus::ProbBonus=zero(ProbBonus)
+    ) =
+        new(up, cards, hero_upgrade_distrib(up, cards, prob_bonus=initial_prob_bonus), prices)
 end
 function show(io::IO, hus::HeroUpgradeStat)
     up::HeroUpgrade = hus.up
@@ -442,8 +447,9 @@ end
 
 function best_sequences(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
-    look_ahead::Int = 10,
-    n_attempts::Int = 100,
+    prob_bonus::ProbBonus=zero(ProbBonus),
+    look_ahead::Int=10,
+    n_attempts::Int=100,
     n_variants::Int=10
 ):: PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
     (hero, target) = up
@@ -451,10 +457,11 @@ function best_sequences(
     pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
     # MAYBE: choose combinations and max progress of permutations
     for sequence in many_permutations(cards, look_ahead)
-        hus = HeroUpgradeStat(up, sequence, prices)
+        hus = HeroUpgradeStat(up, sequence, prices, prob_bonus)
         efficiency = efficiency_of(hus)
         progress = progress_of(hus)
         price = price_of(hus)
+        # also pass prob_bonus
         # (efficiency, progress, price) = expected_stat(
         #     up, sequence, prices,
         #     n_attempts=n_attempts,
