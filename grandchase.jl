@@ -159,12 +159,37 @@ iterate(hur::HeroUpgradeResult, s=1) =
     else nothing
     end
 
+function do_hero_upgrade(
+    up::HeroUpgrade, cards::Vector{Card}, results::Vector{Bool};
+    prob_bonus::ProbBonus=zero(ProbBonus)
+)::NamedTuple{(:hero, :prob_bonus), Tuple{Hero, ProbBonus}}
+    (hero, target) = up
+    (rank, star, lvl) = hero
+    (_, target_star, target_lvl) = target
+    if lvl == star_cap(star)
+        star = inc(star)
+    end
+    for (card, result) in zip(cards, results)
+        monster_star::Star = card.star
+        if result
+            prob_bonus = zero(ProbBonus)
+            lvl += one(UpgradeLvl)
+            if lvl == star_cap(star)
+                star = inc(star)
+            end
+        else
+            prob_bonus += rel_prob_bonus(star, monster_star)
+        end
+    end
+    return (hero=Hero(rank, star, lvl), prob_bonus=prob_bonus)
+end
+
 function simulate_hero_upgrade(
     up::HeroUpgrade, cards;
     ignore_low_star_cards::Bool=false
 )::HeroUpgradeResult
     (hero, target) = up
-    (_, star, lvl) = hero
+    (rank, star, lvl) = hero
     (_, target_star, target_lvl) = target
     prob_bonus::ProbBonus = zero(ProbBonus)
     if isempty(cards) || lvl >= target_lvl
@@ -196,7 +221,7 @@ function simulate_hero_upgrade(
             prob_bonus += rel_prob_bonus(star, monster_star)
         end
     end
-    return HeroUpgradeResult(Hero(star, lvl), n_used_cards)
+    return HeroUpgradeResult(Hero(rank, star, lvl), n_used_cards)
 end
 
 const Price = Float32
@@ -448,10 +473,9 @@ end
 function best_sequences(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    look_ahead::Int=10,
-    n_attempts::Int=100,
+    look_ahead::Int=7,
     n_variants::Int=10
-):: PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
+)::PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}
     (hero, target) = up
     # keeps max n_variants best sequences in reversed order
     pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
@@ -461,12 +485,6 @@ function best_sequences(
         efficiency = efficiency_of(hus)
         progress = progress_of(hus)
         price = price_of(hus)
-        # also pass prob_bonus
-        # (efficiency, progress, price) = expected_stat(
-        #     up, sequence, prices,
-        #     n_attempts=n_attempts,
-        #     ignore_low_star_cards=true
-        # )
         if length(pq) < n_variants
             enqueue!(pq, (sequence, progress) => efficiency)
         elseif peek(pq).second < efficiency
@@ -477,44 +495,85 @@ function best_sequences(
     return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
-#=
 function online_chooser(
-    up::HeroUpgrade, prices::CardPrices, cards::Many{Card},
-    look_ahead::Int = 10,
-    n_attempts::Int = 100;
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
+    prob_bonus::ProbBonus=zero(ProbBonus),
+    look_ahead::Int=7,
     n_variants::Int=10
 )
-    hero::Hero = up.hero
-    target::Hero = up.target
-    function next(result::Union{Nothing,Bool}=nothing)::Card
-        # keeps max n_variants best sequences in reversed order
-        best_sequences::PriorityQueue = PriorityQueue{(Vector{Card}, Progress), Float32}(Base.Order.Reverse)
-        for sequence in many_permutations(cards, look_ahead)
-            average_progress::progress = zero(Progress)
-            average_cost::Float32 = zero(Float32)
-            for _ in 1:n_attempts
-                (h, n) = simulate_hero_upgrade(up, sequence, ignore_low_star_cards=true)
-                progress::progress = h.upgrade/target.upgrade
-                price::Price = sum(map(c -> prices[c], take(n, sequence)))
-                average_progress += progress/n_attempts
-                average_cost += price/(progress*n_attempts)
+    cmd_prompt = "\$ "
+    show_bests_prefix = ""
+    show_status_prefix = "!"
+    show_cards_prefix = ":"
+    set_look_ahead_prefix = "/"
+    set_n_variants_prefix = "*"
+    choose_variant_prefix = "#"
+    continue_upgrade_prefix = ">"
+    end_prefix = "."
+    success_symbol = "+"
+    fail_symbol = "-"
+    bests::Union{Missing, PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}} = missing
+    ended::Bool = false
+    @inline print_status() =
+        println("$up (prob_bonus = $prob_bonus)")
+    print_status()
+    while !ended
+        print(cmd_prompt)
+        s = readline()
+        if s == show_bests_prefix
+            bests = best_sequences(
+                up, prices, cards,
+                prob_bonus=prob_bonus, look_ahead=look_ahead, n_variants=n_variants
+            )
+            println("bests = ", bests)
+        elseif s == show_status_prefix
+            print_status()
+        elseif s == show_cards_prefix
+            println("cards = $cards")
+        elseif startswith(s, set_look_ahead_prefix)
+            look_ahead = parse(Int, strip(s[2:end]))
+        elseif startswith(s, set_n_variants_prefix)
+            n_variants = parse(Int, strip(s[2:end]))
+        elseif startswith(s, choose_variant_prefix)
+            if bests === missing
+                println("calculate bests first")
+            else
+                # example: #1 + 4- 4+ - -
+                parts = split(s)
+                variant_n = parse(Int, parts[1][2:end])
+                (sequence, (efficiency, progress)) = collect(bests)[variant_n]
+                results = Vector{Bool}()
+                for word in parts[2:end]
+                    startswith(word, success_symbol) || startswith(word, fail_symbol) || error("Unexpected word $word")
+                    if length(word) == 1
+                        push!(results, word == success_symbol)
+                    else
+                        n = parse(Int, word[1:end-1])
+                        result = word[end] == success_symbol
+                        append!(results, repeat([result], n))
+                    end
+                end
+                used_cards = take(sequence, length(results))
+                for card in used_cards
+                    cards[card] -= 1
+                end
+                r = do_hero_upgrade(up, used_cards, results)
+                up.hero = r.hero
+                prob_bonus = r.prob_bonus
+                prob_bonus()
             end
-            if length(best_sequences) < n_variants
-                best_sequences[(sequence, average_progress)] = average_cost
-            else if peek(best_sequences).second > average_cost
-                dequeue!(best_sequences)
-                best_sequences[(sequence, average_progress)] = average_cost
-            end
-        end
-        if result === nothing
-            #first turn
+        elseif startswith(s, continue_upgrade_prefix)
+            rest = strip(s[2:end])
+            new_target::Hero = eval(Meta.parse(rest))
+            up.target = new_target
+        elseif s == end_prefix
+            ended = true
         else
-            #>=2nd
+            println("Unrecognized command \"$s\"")
         end
     end
-    return next
 end
-=#
+
 # simple_chooser(30A ↦ 33A, example) =
   # MC ☆      => (42.5726, 8.57915)
   # MC ☆☆     => (58.7123, 5.15569)
@@ -526,22 +585,22 @@ end
 # simple_chooser(40S ↦ 46S, example) =
   # MC ☆      => (155.324, 31.3006)
   # MC ☆☆     => (195.823, 17.1957)
-  # MC ☆☆☆    => (222.142, 10.2657)
   # MC ☆☆☆☆   => (210.094, 5.99982)
+  # MC ☆☆☆    => (222.142, 10.2657)
   # MC ☆☆☆☆☆  => (268.624, 5.99982)
   # MC ☆☆☆☆☆☆ => (305.991, 5.99982)
 
 # simple_chooser(56S ↦ 59S, example) =
-  # MC ☆      => (473.178, 95.354)
-  # MC ☆☆     => (179.108, 15.728)
-  # MC ☆☆☆    => (185.828, 8.58757)
-  # MC ☆☆☆☆   => (180.49, 5.1544)
   # MC ☆☆☆☆☆  => (134.312, 2.99991)
   # MC ☆☆☆☆☆☆ => (152.995, 2.99991)
+  # MC ☆☆     => (179.108, 15.728)
+  # MC ☆☆☆☆   => (180.49, 5.1544)
+  # MC ☆☆☆    => (185.828, 8.58757)
+  # MC ☆      => (473.178, 95.354)
 
 # simple_chooser(60S ↦ 612S, example) =
-  # MC ☆☆     => (4355.21, 382.443)
-  # MC ☆☆☆    => (1360.22, 62.8593)
-  # MC ☆☆☆☆   => (1208.01, 34.4982)
-  # MC ☆☆☆☆☆  => (916.823, 20.4776)
   # MC ☆☆☆☆☆☆ => (611.982, 11.9996)
+  # MC ☆☆☆☆☆  => (916.823, 20.4776)
+  # MC ☆☆☆☆   => (1208.01, 34.4982)
+  # MC ☆☆☆    => (1360.22, 62.8593)
+  # MC ☆☆     => (4355.21, 382.443)
