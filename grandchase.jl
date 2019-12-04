@@ -492,7 +492,7 @@ function best_sequences(
             enqueue!(pq, (sequence, progress) => efficiency)
         end
     end
-    return PriorityQueue(Base.Order.Reverse, seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
+    return PriorityQueue(seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
 function online_chooser(
@@ -521,15 +521,21 @@ function online_chooser(
         print(cmd_prompt)
         s = readline()
         if s == show_bests_prefix
-            bests = best_sequences(
+            bests = PriorityQueue(Base.Order.Reverse, @time best_sequences(
                 up, prices, cards,
                 prob_bonus=prob_bonus, look_ahead=look_ahead, n_variants=n_variants
-            )
-            println("bests = ", bests)
+            ))
+            println("bests = ")
+            for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
+                println("#$i\t$sequence =>\t$(round(efficiency, sigdigits=4)),\t+$(round(progress100, sigdigits=4))%")
+            end
         elseif s == show_status_prefix
             print_status()
         elseif s == show_cards_prefix
-            println("cards = $cards")
+            println("cards = ")
+            for pair in SortedDict(cards)
+                println("  ", pair)
+            end
         elseif startswith(s, set_look_ahead_prefix)
             look_ahead = parse(Int, strip(s[2:end]))
         elseif startswith(s, set_n_variants_prefix)
@@ -544,7 +550,7 @@ function online_chooser(
                 (sequence, (efficiency, progress)) = collect(bests)[variant_n]
                 results = Vector{Bool}()
                 for word in parts[2:end]
-                    startswith(word, success_symbol) || startswith(word, fail_symbol) || error("Unexpected word $word")
+                    endswith(word, success_symbol) || endswith(word, fail_symbol) || error("Unexpected word \"$word\"")
                     if length(word) == 1
                         push!(results, word == success_symbol)
                     else
@@ -557,10 +563,11 @@ function online_chooser(
                 for card in used_cards
                     cards[card] -= 1
                 end
-                r = do_hero_upgrade(up, used_cards, results)
-                up.hero = r.hero
+                r = do_hero_upgrade(up, collect(used_cards), results, prob_bonus=prob_bonus)
+                up = HeroUpgrade(r.hero, up.target)
                 prob_bonus = r.prob_bonus
-                prob_bonus()
+                bests = missing
+                print_status()
             end
         elseif startswith(s, continue_upgrade_prefix)
             rest = strip(s[2:end])
