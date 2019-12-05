@@ -99,7 +99,7 @@ struct HeroUpgrade
     hero::Hero
     target::Hero
     function HeroUpgrade(hero::Hero, target::Hero)
-        target.upgrade > hero.upgrade || error("target hero upgrade < current hero upgrade")
+        target.upgrade >= hero.upgrade || error("target hero upgrade < current hero upgrade")
         hero.upgrade <= star_cap(hero.star) && target.upgrade <= star_cap(target.star) || error("upgrade > star cap")
         hero.rank == target.rank || error("inconsistent hero rank")
         new(hero, target)
@@ -166,7 +166,7 @@ function do_hero_upgrade(
     (hero, target) = up
     (rank, star, lvl) = hero
     (_, target_star, target_lvl) = target
-    if lvl == star_cap(star)
+    if lvl == star_cap(star) && star < target_star
         star = inc(star)
     end
     for (card, result) in zip(cards, results)
@@ -174,7 +174,7 @@ function do_hero_upgrade(
         if result
             prob_bonus = zero(ProbBonus)
             lvl += one(UpgradeLvl)
-            if lvl == star_cap(star)
+            if lvl == star_cap(star) && star < target_star
                 star = inc(star)
             end
         else
@@ -499,8 +499,8 @@ function online_chooser(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
     look_ahead::Int=7,
-    n_variants::Int=10
-)
+    n_variants::Int=3
+)::Many{Card}
     cmd_prompt = "\$ "
     show_bests_prefix = ""
     show_status_prefix = "!"
@@ -515,70 +515,125 @@ function online_chooser(
     bests::Union{Missing, PriorityQueue{Vector{Card}, Tuple{Efficiency, Progress}}} = missing
     ended::Bool = false
     @inline print_status() =
-        println("$up (prob_bonus = $prob_bonus)")
+        println("$up (prob_bonus = $(round(100*prob_bonus, sigdigits=4))%)")
+    @inline unrecognizable(word) =
+        println("Unrecognizable word \"$word\"")
     print_status()
     while !ended
-        print(cmd_prompt)
-        s = readline()
-        if s == show_bests_prefix
-            bests = PriorityQueue(Base.Order.Reverse, @time best_sequences(
-                up, prices, cards,
-                prob_bonus=prob_bonus, look_ahead=look_ahead, n_variants=n_variants
-            ))
-            println("bests = ")
-            for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
-                println("#$i\t$sequence =>\t$(round(efficiency, sigdigits=4)),\t+$(round(progress100, sigdigits=4))%")
-            end
-        elseif s == show_status_prefix
-            print_status()
-        elseif s == show_cards_prefix
-            println("cards = ")
-            for pair in SortedDict(cards)
-                println("  ", pair)
-            end
-        elseif startswith(s, set_look_ahead_prefix)
-            look_ahead = parse(Int, strip(s[2:end]))
-        elseif startswith(s, set_n_variants_prefix)
-            n_variants = parse(Int, strip(s[2:end]))
-        elseif startswith(s, choose_variant_prefix)
-            if bests === missing
-                println("calculate bests first")
-            else
-                # example: #1 + 4- 4+ - -
-                parts = split(s)
-                variant_n = parse(Int, parts[1][2:end])
-                (sequence, (efficiency, progress)) = collect(bests)[variant_n]
-                results = Vector{Bool}()
-                for word in parts[2:end]
-                    endswith(word, success_symbol) || endswith(word, fail_symbol) || error("Unexpected word \"$word\"")
-                    if length(word) == 1
-                        push!(results, word == success_symbol)
-                    else
-                        n = parse(Int, word[1:end-1])
-                        result = word[end] == success_symbol
-                        append!(results, repeat([result], n))
-                    end
+        try
+            print(cmd_prompt)
+            s = readline()
+            if s == show_bests_prefix
+                if up.hero.upgrade == up.target.upgrade
+                    println("Nothing to upgrade")
+                    continue
                 end
-                used_cards = take(sequence, length(results))
-                for card in used_cards
-                    cards[card] -= 1
+                bests = PriorityQueue(Base.Order.Reverse, @time best_sequences(
+                    up, prices, cards,
+                    prob_bonus=prob_bonus, look_ahead=look_ahead, n_variants=n_variants
+                ))
+                println("bests = ")
+                for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
+                    println("#$i\t$sequence =>\t$(round(efficiency, sigdigits=4)),\t+$(round(progress100, sigdigits=4))%")
                 end
-                r = do_hero_upgrade(up, collect(used_cards), results, prob_bonus=prob_bonus)
-                up = HeroUpgrade(r.hero, up.target)
-                prob_bonus = r.prob_bonus
-                bests = missing
+            elseif s == show_status_prefix
                 print_status()
+            elseif s == show_cards_prefix
+                println("cards = ")
+                for pair in SortedDict(cards)
+                    println("  ", pair)
+                end
+            elseif startswith(s, set_look_ahead_prefix)
+                if s == set_look_ahead_prefix
+                    println("look_ahead = ", look_ahead)
+                else
+                    look_ahead = parse(Int, strip(s[2:end]))
+                end
+            elseif startswith(s, set_n_variants_prefix)
+                if s == set_n_variants_prefix
+                    println("n_variants = ", n_variants)
+                else
+                    n_variants = parse(Int, strip(s[2:end]))
+                end
+            elseif startswith(s, choose_variant_prefix)
+                if up.hero.upgrade == up.target.upgrade
+                    println("Nothing to upgrade")
+                    continue
+                end
+                parts = split(s)
+                if length(parts[1]) == 1 # custom turn mode: example: # 4-1 3+2 +1
+                    used_cards = Vector{Card}()
+                    results = Vector{Bool}()
+                    for word in parts[2:end]
+                        form_n_s_c = match(r"(\d+)([^\d]+)(\d+)", word)
+                        form_s_c = match(r"([^\d]+)(\d+)", word)
+                        if form_n_s_c !== nothing
+                            n_part = form_n_s_c[1]
+                            symbol = form_n_s_c[2]
+                            card_part = form_n_s_c[3]
+                        elseif form_s_c !== nothing
+                            n_part = "1"
+                            symbol = form_s_c[1]
+                            card_part = form_s_c[2]
+                        else
+                            unrecognizable(word)
+                            continue
+                        end
+                        symbol == success_symbol || symbol == fail_symbol || unrecognizable(word)
+                        n = parse(Int, n_part)
+                        card = Card(Star(parse(Int, card_part)))
+                        result = symbol == success_symbol
+                        append!(results, repeat([result], n))
+                        append!(used_cards, repeat([card], n))
+                        cards[card] -= n
+                    end
+                    r = do_hero_upgrade(up, used_cards, results, prob_bonus=prob_bonus)
+                    up = HeroUpgrade(r.hero, up.target)
+                    prob_bonus = r.prob_bonus
+                    bests = missing
+                    print_status()
+                elseif bests === missing
+                    println("calculate bests first")
+                else # example: #1 + 4- 4+ - -
+                    variant_n = parse(Int, parts[1][2:end])
+                    (sequence, (efficiency, progress)) = collect(bests)[variant_n]
+                    results = Vector{Bool}()
+                    for word in parts[2:end]
+                        endswith(word, success_symbol) || endswith(word, fail_symbol) || error("Unexpected word \"$word\"")
+                        if length(word) == 1
+                            push!(results, word == success_symbol)
+                        else
+                            n = parse(Int, word[1:end-1])
+                            result = word[end] == success_symbol
+                            append!(results, repeat([result], n))
+                        end
+                    end
+                    used_cards = take(sequence, length(results))
+                    for card in used_cards
+                        cards[card] -= 1
+                    end
+                    r = do_hero_upgrade(up, collect(used_cards), results, prob_bonus=prob_bonus)
+                    up = HeroUpgrade(r.hero, up.target)
+                    prob_bonus = r.prob_bonus
+                    bests = missing
+                    print_status()
+                end
+            elseif startswith(s, continue_upgrade_prefix)
+                rest = strip(s[2:end])
+                new_target::Hero = eval(Meta.parse(rest))
+                up = HeroUpgrade(up.hero, new_target)
+            elseif s == end_prefix
+                ended = true
+            else
+                println("Unrecognized command \"$s\"")
             end
-        elseif startswith(s, continue_upgrade_prefix)
-            rest = strip(s[2:end])
-            new_target::Hero = eval(Meta.parse(rest))
-            up.target = new_target
-        elseif s == end_prefix
-            ended = true
-        else
-            println("Unrecognized command \"$s\"")
+        catch e
+            println("Error occured while parsing/proceeding command:")
+            println(e)
+            println("Please, try again!")
         end
     end
+    return cards
 end
 
 # simple_chooser(30A ↦ 33A, example) =
