@@ -3,6 +3,7 @@ using Distributions
 using DataStructures
 using Combinatorics
 using Base.Iterators
+using Printf
 import Base: *, -, >, show, convert, isless, iterate
 
 @enum Star::UInt8 ☆=0x1 ☆☆ ☆☆☆ ☆☆☆☆ ☆☆☆☆☆ ☆☆☆☆☆☆
@@ -495,6 +496,40 @@ function best_sequences(
     return PriorityQueue(seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
+# TODO: best sequence, considering online 1/batch operation mode
+function best_online_sequence(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
+    prob_bonus::ProbBonus=zero(ProbBonus),
+    depth::Int=7
+)::Tuple{Card, Efficiency}
+    (hero, target) = up
+    hero.upgrade == target.upgrade && error("nothing to upgrade")
+    if depth == 0
+        1
+    end
+    best_card = missing
+    max_efficient = missing
+    # TODO: accum price! (not efficiency)
+    for card in keys(cards)
+        next_cards = Many{Card}(cards)
+        next_cards[card] -= 1
+        success_prob::Prob = min(rel_prob(hero.star, card.star) + prob_bonus, one(Prob))
+        (rank, star, lvl) = hero
+        if lvl == star_cap(star) && star < target.star
+            star = inc(star)
+        end
+        if lvl + 1 == target.upgrade
+            1 ? inf
+        else
+            success_hero = Hero(rank, star, lvl + 1)
+            (_, success_max_efficiency) = best_online_sequence(HeroUpgrade(success_hero, target), prices, next_cards, prob_bonus=zero(ProbBonus), depth=depth-1)
+        end
+        fail_prob::Prob = 1 - success_prob
+        fail_prob_bonus = prob_bonus + rel_prob_bonus(hero.star, card.star)
+        (_, fail_max_efficiency) = best_online_sequence(up, prices, next_cards, prob_bonus=fail_prob_bonus, depth=depth-1)
+        efficiency = p * success_max_efficiency + (1 - p) * fail_max_efficiency
+end
+
 function online_chooser(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
@@ -504,9 +539,9 @@ function online_chooser(
     cmd_prompt = "\$ "
     show_bests_prefix = ""
     show_status_prefix = "!"
-    show_cards_prefix = ":"
-    set_look_ahead_prefix = "/"
-    set_n_variants_prefix = "*"
+    cards_prefix = ":"
+    look_ahead_prefix = "/"
+    n_variants_prefix = "*"
     choose_variant_prefix = "#"
     continue_upgrade_prefix = ">"
     end_prefix = "."
@@ -534,23 +569,35 @@ function online_chooser(
                 ))
                 println("bests = ")
                 for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
-                    println("#$i\t$sequence =>\t$(round(efficiency, sigdigits=4)),\t+$(round(progress100, sigdigits=4))%")
+                    println("#$i\t$sequence =>\t$(@sprintf("%.6f", efficiency)),\t+$(@sprintf("%.4f", progress100))%")
                 end
             elseif s == show_status_prefix
                 print_status()
-            elseif s == show_cards_prefix
+            elseif s == cards_prefix
                 println("cards = ")
                 for pair in SortedDict(cards)
                     println("  ", pair)
                 end
-            elseif startswith(s, set_look_ahead_prefix)
-                if s == set_look_ahead_prefix
+            elseif startswith(s, cards_prefix) # example: : 2=5 6=0 1=102
+                for assignment in split(strip(s[2:end]))
+                    d_eq_d = match(r"(\d+)=(\d+)", s)
+                    if d_eq_d === nothing
+                        unrecognizable(s)
+                        continue
+                    else
+                        mc = parse(Int, d_eq_d[1])MC
+                        count = parse(Int, d_eq_d[2])
+                        cards[mc] = count
+                    end
+                end
+            elseif startswith(s, look_ahead_prefix)
+                if s == look_ahead_prefix
                     println("look_ahead = ", look_ahead)
                 else
                     look_ahead = parse(Int, strip(s[2:end]))
                 end
-            elseif startswith(s, set_n_variants_prefix)
-                if s == set_n_variants_prefix
+            elseif startswith(s, n_variants_prefix)
+                if s == n_variants_prefix
                     println("n_variants = ", n_variants)
                 else
                     n_variants = parse(Int, strip(s[2:end]))
