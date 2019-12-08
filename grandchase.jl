@@ -227,7 +227,7 @@ end
 
 const Price = Float32
 const Prices{T} = Dict{T, Price}
-const Progress = Float32
+const Progress = Float32 # 100(target lvl - current hero lvl)/(target lvl - hero0 lvl)
 const AverageCount = Float32
 const Efficiency = Float32 # progress % / price
 const CardPrices = Prices{Card}
@@ -275,7 +275,7 @@ const price3d1L = 5.23 # * 2MC : H50 -> H51
 const price4d1L = 31.8 # * 1MC : H50 -> H51
 # USE: expected_n_cards(50H ↦ 59H, ?MC; n_attempts=1_000_000)/9
 
-@inline function price(d::Int8)::Price
+@inline function d_price(d::Int8)::Price
     if d <= 0x0 1/price0d1L
     elseif d == 0x1 1/price1d1L
     elseif d == 0x2 1/price2d1L
@@ -294,13 +294,13 @@ function prices_of(ups::Many{HeroUpgrade})::CardPrices
         if hero.upgrade < target.upgrade
             before_star_cap::UpgradeLvl = star_cap(hero.star) - hero.upgrade
             for card in all_cards
-                ps[card] += before_star_cap * price(hero.star - card.star)
+                ps[card] += before_star_cap * d_price(hero.star - card.star)
             end
             n_star_incs::UInt8 = (target.upgrade - star_cap(hero.star)) ÷ 0x3
             for d_star = 0x1:n_star_incs
                 star::Star = inc(hero.star, d_star)
                 for card in all_cards
-                    ps[card] += 0x3 * price(star - card.star)
+                    ps[card] += 0x3 * d_price(star - card.star)
                 end
             end
         end
@@ -496,38 +496,79 @@ function best_sequences(
     return PriorityQueue(seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
-# TODO: best sequence, considering online 1/batch operation mode
-function best_online_sequence(
+function best_online_answers(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    depth::Int=7
-)::Tuple{Card, Efficiency}
+    depth::Int=7,
+)::Dict{Card, Efficiency}
+    (card, eff) = _best_online_answer(
+        up, prices, Dict(c => n for (c, n) in cards if n > 0),
+        prob_bonus=prob_bonus,
+        depth=depth
+    )
+    efficiency::Efficiency = eff/(up.target.upgrade - up.hero.upgrade)
+    return (card, efficiency)
+end
+
+const DUpgradeLvl = UpgradeLvl
+
+ # NOTE: another definition of efficiency: d_lvl/price
+function _best_online_answer(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
+    prob_bonus::ProbBonus=zero(ProbBonus),
+    depth::Int=7,
+    d_lvl::DUpgradeLvl=zero(DUpgradeLvl),
+    price::Price=zero(Price)
+)::Tuple{Union{Missing, Card}, Efficiency}
+    all(n > 0 for (c, n) in cards) || error("contains cards with 0 count -- they should be deleted")
     (hero, target) = up
-    hero.upgrade == target.upgrade && error("nothing to upgrade")
-    if depth == 0
-        1
+    if depth == 0 || isempty(cards) || hero.upgrade == target.upgrade
+        return (missing, d_lvl/price)
     end
-    best_card = missing
-    max_efficient = missing
-    # TODO: accum price! (not efficiency)
+    best_card::Union{Missing, Card} = missing
+    best_card_efficiency::Efficiency = -1 # less than any sane efficiency
     for card in keys(cards)
         next_cards = Many{Card}(cards)
-        next_cards[card] -= 1
+        card_count = next_cards[card]
+        if card_count == 1
+            delete!(next_cards, card)
+        else
+            next_cards[card] = card_count - 1
+        end
         success_prob::Prob = min(rel_prob(hero.star, card.star) + prob_bonus, one(Prob))
         (rank, star, lvl) = hero
+        next_lvl = lvl + one(DUpgradeLvl)
+        next_price = price + prices[card]
         if lvl == star_cap(star) && star < target.star
             star = inc(star)
         end
-        if lvl + 1 == target.upgrade
-            1 ? inf
+        next_d_lvl = d_lvl + one(DUpgradeLvl)
+        if next_lvl == target.upgrade
+            success_efficiency = next_d_lvl/next_price
         else
-            success_hero = Hero(rank, star, lvl + 1)
-            (_, success_max_efficiency) = best_online_sequence(HeroUpgrade(success_hero, target), prices, next_cards, prob_bonus=zero(ProbBonus), depth=depth-1)
+            success_hero = Hero(rank, star, next_lvl)
+            (_, success_efficiency) = _best_online_answer(
+                HeroUpgrade(success_hero, target), prices, next_cards,
+                prob_bonus=zero(ProbBonus), depth=depth-1,
+                d_lvl=next_d_lvl,
+                price=next_price
+            )
         end
         fail_prob::Prob = 1 - success_prob
         fail_prob_bonus = prob_bonus + rel_prob_bonus(hero.star, card.star)
-        (_, fail_max_efficiency) = best_online_sequence(up, prices, next_cards, prob_bonus=fail_prob_bonus, depth=depth-1)
-        efficiency = p * success_max_efficiency + (1 - p) * fail_max_efficiency
+        (_, fail_efficiency) = _best_online_answer(
+            up, prices, next_cards,
+            prob_bonus=fail_prob_bonus, depth=depth-1,
+            d_lvl=d_lvl,
+            price=next_price
+        )
+        expected_efficiency::Efficiency = success_prob*success_efficiency + fail_prob*fail_efficiency
+        if expected_efficiency > best_card_efficiency
+            best_card = card
+            best_card_efficiency = expected_efficiency
+        end
+    end
+    return (best_card::Card, best_card_efficiency)
 end
 
 function online_chooser(
@@ -537,7 +578,8 @@ function online_chooser(
     n_variants::Int=3
 )::Many{Card}
     cmd_prompt = "\$ "
-    show_bests_prefix = ""
+    show_best_sequences_prefix = ""
+    show_best_card_prefix = "1"
     show_status_prefix = "!"
     cards_prefix = ":"
     look_ahead_prefix = "/"
@@ -558,7 +600,7 @@ function online_chooser(
         try
             print(cmd_prompt)
             s = readline()
-            if s == show_bests_prefix
+            if s == show_best_sequences_prefix
                 if up.hero.upgrade == up.target.upgrade
                     println("Nothing to upgrade")
                     continue
@@ -571,6 +613,17 @@ function online_chooser(
                 for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
                     println("#$i\t$sequence =>\t$(@sprintf("%.6f", efficiency)),\t+$(@sprintf("%.4f", progress100))%")
                 end
+            elseif s == show_best_card_prefix
+                if up.hero.upgrade == up.target.upgrade
+                    println("Nothing to upgrade")
+                    continue
+                end
+                (best_card, best_card_efficiency) = @time best_online_answer(
+                    up, prices, cards,
+                    prob_bonus=prob_bonus,
+                    depth=look_ahead
+                )
+                println("best = ", best_card, ", efficiency = ", best_card_efficiency)
             elseif s == show_status_prefix
                 print_status()
             elseif s == cards_prefix
@@ -683,7 +736,7 @@ function online_chooser(
     return cards
 end
 
-# simple_chooser(30A ↦ 33A, example) =
+# simple_chooser(30A > 33A, example) =
   # MC ☆      => (42.5726, 8.57915)
   # MC ☆☆     => (58.7123, 5.15569)
   # MC ☆☆☆    => (64.9155, 2.99991)
@@ -691,7 +744,7 @@ end
   # MC ☆☆☆☆☆  => (134.312, 2.99991)
   # MC ☆☆☆☆☆☆ => (152.995, 2.99991)
 
-# simple_chooser(40S ↦ 46S, example) =
+# simple_chooser(40S > 46S, example) =
   # MC ☆      => (155.324, 31.3006)
   # MC ☆☆     => (195.823, 17.1957)
   # MC ☆☆☆☆   => (210.094, 5.99982)
@@ -699,7 +752,7 @@ end
   # MC ☆☆☆☆☆  => (268.624, 5.99982)
   # MC ☆☆☆☆☆☆ => (305.991, 5.99982)
 
-# simple_chooser(56S ↦ 59S, example) =
+# simple_chooser(56S > 59S, example) =
   # MC ☆☆☆☆☆  => (134.312, 2.99991)
   # MC ☆☆☆☆☆☆ => (152.995, 2.99991)
   # MC ☆☆     => (179.108, 15.728)
@@ -707,7 +760,7 @@ end
   # MC ☆☆☆    => (185.828, 8.58757)
   # MC ☆      => (473.178, 95.354)
 
-# simple_chooser(60S ↦ 612S, example) =
+# simple_chooser(60S > 612S, example) =
   # MC ☆☆☆☆☆☆ => (611.982, 11.9996)
   # MC ☆☆☆☆☆  => (916.823, 20.4776)
   # MC ☆☆☆☆   => (1208.01, 34.4982)
