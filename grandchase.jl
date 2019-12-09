@@ -491,6 +491,55 @@ function best_sequences(
     return PriorityQueue(seq => (efficiency, progress) for ((seq, progress), efficiency) in pq)
 end
 
+const DUpgradeLvl = UpgradeLvl
+const Efficiency1 = Efficiency # = d_lvl/price
+
+@inline function _online_card_efficiency1(
+    up::HeroUpgrade, prices::CardPrices, cards::Many{Card}, card::Card;
+    prob_bonus::ProbBonus=zero(ProbBonus),
+    depth::Int=7,
+    d_lvl::DUpgradeLvl=zero(DUpgradeLvl),
+    price::Price=zero(Price)
+)::Efficiency1
+    (hero, target) = up
+    next_cards = Many{Card}(cards)
+    card_count = next_cards[card]
+    if card_count == 1
+        delete!(next_cards, card)
+    else
+        next_cards[card] = card_count - 1
+    end
+    success_prob::Prob = min(rel_prob(hero.star, card.star) + prob_bonus, one(Prob))
+    (rank, star, lvl) = hero
+    next_lvl = lvl + one(DUpgradeLvl)
+    next_price = price + prices[card]
+    if lvl == star_cap(star) && star < target.star
+        star = inc(star)
+    end
+    next_d_lvl = d_lvl + one(DUpgradeLvl)
+    if next_lvl == target.upgrade
+        success_efficiency = next_d_lvl/next_price
+    else
+        success_hero = Hero(rank, star, next_lvl)
+        (_, success_efficiency) = _best_online_answer(
+        HeroUpgrade(success_hero, target), prices, next_cards,
+        prob_bonus=zero(ProbBonus), depth=depth-1,
+        d_lvl=next_d_lvl,
+        price=next_price
+        )
+    end
+    fail_prob::Prob = 1 - success_prob
+    fail_prob_bonus = prob_bonus + rel_prob_bonus(hero.star, card.star)
+    (_, fail_efficiency) = _best_online_answer(
+    up, prices, next_cards,
+    prob_bonus=fail_prob_bonus, depth=depth-1,
+    d_lvl=d_lvl,
+    price=next_price
+    )
+    expected_efficiency::Efficiency1 = success_prob*success_efficiency + fail_prob*fail_efficiency
+    return expected_efficiency
+end
+
 function best_online_answers(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
@@ -498,72 +547,36 @@ function best_online_answers(
 )::PriorityQueue{Card, Efficiency}
     up.hero.upgrade < up.target.upgrade || error("nothing to upgrade")
     existing_cards = Dict(c => n for (c, n) in cards if n > 0)
-    pq = PriorityQueue{Card, Efficiency}()
+    pq::PriorityQueue{Card, Efficiency} = PriorityQueue{Card, Efficiency}(Base.Order.Reverse)
     for card in keys(existing_cards)
-        # TODO: collect 'em in pq
+        eff1::Efficiency1 = _online_card_efficiency1(
+            up, prices, cards, card,
+            prob_bonus=prob_bonus, depth=depth, d_lvl=d_lvl, price=price
+        )
+        efficiency::Efficiency = eff1/(up.target.upgrade - up.hero.upgrade)
+        pq.enqueue!(pq, card => efficiency)
     end
-    (card, eff) = _best_online_answer(
-        up, prices, existing_cards,
-        prob_bonus=prob_bonus,
-        depth=depth
-    )
-    efficiency::Efficiency = eff/(up.target.upgrade - up.hero.upgrade)
-    return (card, efficiency)
+    return pq
 end
 
-const DUpgradeLvl = UpgradeLvl
-
- # NOTE: another definition of efficiency: d_lvl/price
 function _best_online_answer(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
     depth::Int=7,
     d_lvl::DUpgradeLvl=zero(DUpgradeLvl),
     price::Price=zero(Price)
-)::Tuple{Union{Missing, Card}, Efficiency}
+)::Tuple{Union{Missing, Card}, Efficiency1}
     all(n > 0 for (c, n) in cards) || error("contains cards with 0 count -- they should be deleted")
-    (hero, target) = up
-    if depth == 0 || isempty(cards) || hero.upgrade == target.upgrade
+    if depth == 0 || is empty(cards) || hero.upgrade == target.upgrade
         return (missing, d_lvl/price)
     end
     best_card::Union{Missing, Card} = missing
-    best_card_efficiency::Efficiency = -1 # less than any sane efficiency
+    best_card_efficiency::Efficiency1 = -1 # less than any sane efficiency1
     for card in keys(cards)
-        next_cards = Many{Card}(cards)
-        card_count = next_cards[card]
-        if card_count == 1
-            delete!(next_cards, card)
-        else
-            next_cards[card] = card_count - 1
-        end
-        success_prob::Prob = min(rel_prob(hero.star, card.star) + prob_bonus, one(Prob))
-        (rank, star, lvl) = hero
-        next_lvl = lvl + one(DUpgradeLvl)
-        next_price = price + prices[card]
-        if lvl == star_cap(star) && star < target.star
-            star = inc(star)
-        end
-        next_d_lvl = d_lvl + one(DUpgradeLvl)
-        if next_lvl == target.upgrade
-            success_efficiency = next_d_lvl/next_price
-        else
-            success_hero = Hero(rank, star, next_lvl)
-            (_, success_efficiency) = _best_online_answer(
-                HeroUpgrade(success_hero, target), prices, next_cards,
-                prob_bonus=zero(ProbBonus), depth=depth-1,
-                d_lvl=next_d_lvl,
-                price=next_price
-            )
-        end
-        fail_prob::Prob = 1 - success_prob
-        fail_prob_bonus = prob_bonus + rel_prob_bonus(hero.star, card.star)
-        (_, fail_efficiency) = _best_online_answer(
-            up, prices, next_cards,
-            prob_bonus=fail_prob_bonus, depth=depth-1,
-            d_lvl=d_lvl,
-            price=next_price
+        expected_efficiency = _online_card_efficiency1(
+            up, prices, cards, card,
+            prob_bonus=prob_bonus, depth=depth, d_lvl=d_lvl, price=price
         )
-        expected_efficiency::Efficiency = success_prob*success_efficiency + fail_prob*fail_efficiency
         if expected_efficiency > best_card_efficiency
             best_card = card
             best_card_efficiency = expected_efficiency
@@ -619,12 +632,12 @@ function online_chooser(
                     println("Nothing to upgrade")
                     continue
                 end
-                (best_card, best_card_efficiency) = @time best_online_answer(
+                best_answers = @time best_online_answers(
                     up, prices, cards,
                     prob_bonus=prob_bonus,
                     depth=look_ahead
                 )
-                println("best = ", best_card, ", efficiency = ", best_card_efficiency)
+                # TODO: display
             elseif s == show_status_prefix
                 print_status()
             elseif s == cards_prefix
