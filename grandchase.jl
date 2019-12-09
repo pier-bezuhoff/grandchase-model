@@ -33,10 +33,6 @@ const game_price_MC2 = 15
 const game_price_MC3 = 45
 
 const UpgradeLvl = UInt8 # 0..12
-struct LvlSymbol end
-const L = LvlSymbol()
-*(n::Int, ::LvlSymbol)::UpgradeLvl =
-    UpgradeLvl(n)
 
 @inline function star_cap(star::Star)::UpgradeLvl
     if star == ☆☆☆ UpgradeLvl(3)
@@ -53,7 +49,7 @@ struct Hero
     star::Star
     upgrade::UpgradeLvl
     function Hero(rank::HeroRank, star::Star, upgrade::UpgradeLvl)
-        UInt8(star) >= 0x3 || error("hero star >= 3")
+        UInt8(star) >= 0x3 || error("hero star should be >= 3")
         upgrade <= star_cap(star) || error("hero upgrade capped by star")
         rank == H ||
         rank == A ||
@@ -457,7 +453,7 @@ function efficiency_of(hus::HeroUpgradeStat)::Efficiency
     else
         return average(
             Efficiency,
-            (((_,_,lvl), n),) -> Efficiency(100(lvl-lvl0)/((lvl1-lvl0) * sum(map(c->hus.prices[c], take(hus.cards, n))))),
+            (((_,_,lvl),n),) -> Efficiency(100(lvl-lvl0)/((lvl1-lvl0) * sum(map(c->hus.prices[c], take(hus.cards, n))))),
             hus.distrib
         )
     end
@@ -480,7 +476,6 @@ function best_sequences(
     (hero, target) = up
     # keeps max n_variants best sequences in reversed order
     pq::PriorityQueue{Tuple{Vector{Card}, Progress}, Efficiency} = PriorityQueue()
-    # MAYBE: choose combinations and max progress of permutations
     for sequence in many_permutations(cards, look_ahead)
         hus = HeroUpgradeStat(up, sequence, prices, prob_bonus)
         efficiency = efficiency_of(hus)
@@ -500,9 +495,15 @@ function best_online_answers(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
     depth::Int=7,
-)::Dict{Card, Efficiency}
+)::PriorityQueue{Card, Efficiency}
+    up.hero.upgrade < up.target.upgrade || error("nothing to upgrade")
+    existing_cards = Dict(c => n for (c, n) in cards if n > 0)
+    pq = PriorityQueue{Card, Efficiency}()
+    for card in keys(existing_cards)
+        # TODO: collect 'em in pq
+    end
     (card, eff) = _best_online_answer(
-        up, prices, Dict(c => n for (c, n) in cards if n > 0),
+        up, prices, existing_cards,
         prob_bonus=prob_bonus,
         depth=depth
     )
