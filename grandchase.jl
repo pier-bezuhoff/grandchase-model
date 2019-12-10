@@ -543,18 +543,18 @@ end
 function best_online_answers(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    depth::Int=7,
+    depth::Int=6,
 )::PriorityQueue{Card, Efficiency}
     up.hero.upgrade < up.target.upgrade || error("nothing to upgrade")
     existing_cards = Dict(c => n for (c, n) in cards if n > 0)
     pq::PriorityQueue{Card, Efficiency} = PriorityQueue{Card, Efficiency}(Base.Order.Reverse)
     for card in keys(existing_cards)
         eff1::Efficiency1 = _online_card_efficiency1(
-            up, prices, cards, card,
-            prob_bonus=prob_bonus, depth=depth, d_lvl=d_lvl, price=price
+            up, prices, existing_cards, card,
+            prob_bonus=prob_bonus, depth=depth, d_lvl=zero(DUpgradeLvl), price=zero(Price)
         )
         efficiency::Efficiency = eff1/(up.target.upgrade - up.hero.upgrade)
-        pq.enqueue!(pq, card => efficiency)
+        enqueue!(pq, card => efficiency)
     end
     return pq
 end
@@ -562,12 +562,12 @@ end
 function _best_online_answer(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    depth::Int=7,
+    depth::Int=6,
     d_lvl::DUpgradeLvl=zero(DUpgradeLvl),
     price::Price=zero(Price)
 )::Tuple{Union{Missing, Card}, Efficiency1}
     all(n > 0 for (c, n) in cards) || error("contains cards with 0 count -- they should be deleted")
-    if depth == 0 || is empty(cards) || hero.upgrade == target.upgrade
+    if depth == 0 || isempty(cards) || up.hero.upgrade == up.target.upgrade
         return (missing, d_lvl/price)
     end
     best_card::Union{Missing, Card} = missing
@@ -588,7 +588,7 @@ end
 function online_chooser(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    look_ahead::Int=7,
+    look_ahead::Int=6,
     n_variants::Int=3
 )::Many{Card}
     cmd_prompt = "\$ "
@@ -623,7 +623,7 @@ function online_chooser(
                     up, prices, cards,
                     prob_bonus=prob_bonus, look_ahead=look_ahead, n_variants=n_variants
                 ))
-                println("bests = ")
+                println("bests =")
                 for (i, (sequence, (efficiency, progress100))) in enumerate(bests)
                     println("#$i\t$sequence =>\t$(@sprintf("%.6f", efficiency)),\t+$(@sprintf("%.4f", progress100))%")
                 end
@@ -637,7 +637,10 @@ function online_chooser(
                     prob_bonus=prob_bonus,
                     depth=look_ahead
                 )
-                # TODO: display
+                println("best_answers =")
+                for (card, efficiency) in best_answers
+                    println("\t$card =>\t$(@sprintf("%.6f", efficiency))")
+                end
             elseif s == show_status_prefix
                 print_status()
             elseif s == cards_prefix
