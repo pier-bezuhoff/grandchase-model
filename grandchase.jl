@@ -549,6 +549,7 @@ function best_online_answers(
     existing_cards = Dict(c => n for (c, n) in cards if n > 0)
     pq::PriorityQueue{Card, Efficiency} = PriorityQueue{Card, Efficiency}(Base.Order.Reverse)
     for card in keys(existing_cards)
+        up.hero.star - card.star > 0x4 && continue # cannot use small cards for high-star hero
         eff1::Efficiency1 = _online_card_efficiency1(
             up, prices, existing_cards, card,
             prob_bonus=prob_bonus, depth=depth, d_lvl=zero(DUpgradeLvl), price=zero(Price)
@@ -573,6 +574,7 @@ function _best_online_answer(
     best_card::Union{Missing, Card} = missing
     best_card_efficiency::Efficiency1 = -1 # less than any sane efficiency1
     for card in keys(cards)
+        up.hero.star - card.star > 0x4 && continue # cannot use small cards for high-star hero
         expected_efficiency = _online_card_efficiency1(
             up, prices, cards, card,
             prob_bonus=prob_bonus, depth=depth, d_lvl=d_lvl, price=price
@@ -650,7 +652,7 @@ function online_chooser(
                 end
             elseif startswith(s, cards_prefix) # example: : 2=5 6=0 1=102
                 for assignment in split(strip(s[2:end]))
-                    d_eq_d = match(r"(\d+)=(\d+)", s)
+                    d_eq_d = match(r"(\d+)=(\d+)", assignment)
                     if d_eq_d === nothing
                         unrecognizable(s)
                         continue
