@@ -587,10 +587,13 @@ function _best_online_answer(
     return (best_card::Card, best_card_efficiency)
 end
 
+# TODO: "~": estimate homogenous card usage: "~1"
+# TODO: "?": estimate prob of "$ 5-3 +1" event
+# TODO: "%": record & estimate relative efficiency/luck
 function online_chooser(
     up::HeroUpgrade, prices::CardPrices, cards::Many{Card};
     prob_bonus::ProbBonus=zero(ProbBonus),
-    look_ahead::Int=6,
+    look_ahead::Int=7,
     n_variants::Int=3
 )::Many{Card}
     cmd_prompt = "\$ "
@@ -651,6 +654,7 @@ function online_chooser(
                     println("  ", pair)
                 end
             # MAYBE: new syntax: 2+=100 1-=12 3=6 2+=10
+            # MAYBE: new syntax: "$ :5" => print # of 5MC
             elseif startswith(s, cards_prefix) # example: : 2=5 6=0 1=102
                 for assignment in split(strip(s[2:end]))
                     d_eq_d = match(r"(\d+)=(\d+)", assignment)
