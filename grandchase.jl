@@ -650,6 +650,7 @@ function online_chooser(
                 for pair in SortedDict(cards)
                     println("  ", pair)
                 end
+            # MAYBE: new syntax: 2+=100 1-=12 3=6 2+=10
             elseif startswith(s, cards_prefix) # example: : 2=5 6=0 1=102
                 for assignment in split(strip(s[2:end]))
                     d_eq_d = match(r"(\d+)=(\d+)", assignment)
@@ -680,6 +681,7 @@ function online_chooser(
                     continue
                 end
                 parts = split(s)
+                # MAYBE: new syntax: (5+--3-2-3+)1 -3 (-+-)2
                 if length(parts[1]) == 1 # custom turn mode: example: # 4-1 3+2 +1
                     used_cards = Vector{Card}()
                     results = Vector{Bool}()
@@ -701,6 +703,7 @@ function online_chooser(
                         symbol == success_symbol || symbol == fail_symbol || unrecognizable(word)
                         n = parse(Int, n_part)
                         card = Card(Star(parse(Int, card_part)))
+                        get(cards, card, 0) - n >= 0 || error("Not enough cards $card")
                         result = symbol == success_symbol
                         append!(results, repeat([result], n))
                         append!(used_cards, repeat([card], n))
